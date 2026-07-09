@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>kritX — your learning OS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0e1a">
+<link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- Onboarding (first launch) -->
+<div class="onboard" id="onboard" hidden>
+  <div class="onboard-card">
+    <p class="auth-mark">kritX</p>
+    <h1 class="onboard-title">Your personal<br>learning OS</h1>
+    <p class="onboard-sub">Turn what you learn into a growing, revisitable body of skills — with progress you can see and a reason to keep going. Everything is saved right on this device.</p>
+    <div class="field">
+      <label for="ob-name">What should we call you?</label>
+      <input type="text" id="ob-name" placeholder="e.g. Arjun" autocomplete="off">
+    </div>
+    <button class="btn btn-primary btn-block" id="ob-start">Get started</button>
+    <p class="onboard-note">No account, no internet needed. Your data lives on this device and can be backed up to a file anytime.</p>
+  </div>
+</div>
+
+<!-- App -->
+<div class="app" id="app" hidden>
+
+  <!-- desktop sidebar -->
+  <aside class="sidebar">
+    <div class="side-brand">
+      <span class="side-logo">◆</span>
+      <div>
+        <p class="side-name">kritX</p>
+        <p class="side-tag">learning OS</p>
+      </div>
+    </div>
+
+    <button class="side-new" data-route="new"><span>＋</span> New task</button>
+
+    <nav class="side-nav">
+      <button class="nav-link" data-route="home"><span class="nav-ico">◆</span> Dashboard</button>
+      <button class="nav-link" data-route="tasks"><span class="nav-ico">▤</span> Tasks</button>
+      <button class="nav-link" data-route="codex"><span class="nav-ico">📖</span> Codex</button>
+      <button class="nav-link" data-route="market"><span class="nav-ico">💰</span> Skill Value</button>
+    </nav>
+
+    <button class="side-user" data-route="profile">
+      <span class="side-avatar" id="sideAvatar">★</span>
+      <span class="side-user-body">
+        <span class="side-user-name" id="sideName">You</span>
+        <span class="side-user-sub">View profile</span>
+      </span>
+    </button>
+  </aside>
+
+  <!-- main area -->
+  <div class="main-area">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div>
+          <p class="topbar-eyebrow" id="topEyebrow">kritX</p>
+          <h1 class="topbar-title" id="topTitle">Dashboard</h1>
+        </div>
+        <div id="topAction"></div>
+      </div>
+    </header>
+
+    <main class="content" id="view"></main>
+  </div>
+
+  <!-- mobile bottom tabs -->
+  <nav class="tabbar" id="tabbar">
+    <button class="tab" data-route="home"><span class="tab-ico">◆</span><span>Home</span></button>
+    <button class="tab" data-route="tasks"><span class="tab-ico">▤</span><span>Tasks</span></button>
+    <button class="tab tab-fab" data-route="new"><span class="tab-fab-ico">+</span></button>
+    <button class="tab" data-route="codex"><span class="tab-ico">📖</span><span>Codex</span></button>
+    <button class="tab" data-route="market"><span class="tab-ico">💰</span><span>Worth</span></button>
+  </nav>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+
+<script src="js/store.js"></script>
+<script src="js/market.js"></script>
+<script src="js/live.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

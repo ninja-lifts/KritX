@@ -1,0 +1,9 @@
+{
+  "appId": "com.kritx.app",
+  "appName": "kritX",
+  "webDir": "www",
+  "backgroundColor": "#0b0e1a",
+  "android": {
+    "allowMixedContent": true
+  }
+}

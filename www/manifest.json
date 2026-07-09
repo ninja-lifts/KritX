@@ -1,0 +1,13 @@
+{
+  "name": "kritX — Learning OS",
+  "short_name": "kritX",
+  "description": "Turn tasks into a revisitable body of skills. Offline, on-device.",
+  "start_url": "index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0e1a",
+  "theme_color": "#0b0e1a",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
