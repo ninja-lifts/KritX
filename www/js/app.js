@@ -1465,7 +1465,11 @@ function renderProfile() {
       <div class="avatar-xl">${esc(initials(p.name))}</div>
       <h2 class="hero-name">${esc(p.name || "You")}</h2>
       <div class="hero-rank">◆ Lv ${rank.level} · ${esc(rank.name)}</div>
-      <p class="hero-since">Learning since ${esc((p.createdAt || "").slice(0, 10))}</p>
+      <p class="hero-since">${
+        Sync.username()
+          ? `@${esc(Sync.username())} · synced account`
+          : "Learning since " + esc((p.createdAt || "").slice(0, 10))
+      }</p>
       <div class="hero-progress">
         <div class="hero-progress-fill" style="width:${rank.pct}%"></div>
       </div>
@@ -1476,6 +1480,14 @@ function renderProfile() {
             )}</b>`
           : "Top rank reached 🏆"
       }</p>
+    </div>
+
+    <div class="sync-banner ${Sync.token() ? "ok" : ""}">
+      ${
+        Sync.token()
+          ? `🟢 Signed in as <b>@${esc(Sync.username())}</b> — your Codex syncs to every device you log into with this password.`
+          : `⚪ Not signed in — log in to sync across laptops.`
+      }
     </div>
 
     <div class="stat-grid">
@@ -1503,7 +1515,7 @@ function renderProfile() {
 
     ${categoryBreakdown()}
 
-    <div class="section-head"><p class="section-label">Your name</p></div>
+    <div class="section-head"><p class="section-label">Display name</p></div>
     <div class="add-sub">
       <input type="text" id="editName" value="${esc(p.name)}" placeholder="Your name">
       <button class="btn btn-ghost btn-sm" id="saveName">Save</button>
@@ -1538,26 +1550,36 @@ function renderProfile() {
     </div>
     <button class="btn btn-ghost btn-block" id="saveAdz">Save market keys</button>
 
-    <div class="section-head"><p class="section-label">Backup & data</p></div>
+    <div class="section-head"><p class="section-label">Account & backup</p></div>
     <div class="settings-card">
+      <button class="settings-row" id="syncNowBtn">
+        <span class="sr-ico">☁</span>
+        <span class="sr-body"><span class="sr-title">Sync now</span><span class="sr-sub">Push this device's data to the server</span></span>
+        <span class="sr-arrow">›</span>
+      </button>
       <button class="settings-row" id="exportBtn">
         <span class="sr-ico">⬇</span>
-        <span class="sr-body"><span class="sr-title">Export backup</span><span class="sr-sub">Save all your data to a .json file</span></span>
+        <span class="sr-body"><span class="sr-title">Export backup</span><span class="sr-sub">Save a .json file copy</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="importBtn">
         <span class="sr-ico">⬆</span>
-        <span class="sr-body"><span class="sr-title">Import backup</span><span class="sr-sub">Restore data on this or a new device</span></span>
+        <span class="sr-body"><span class="sr-title">Import backup</span><span class="sr-sub">Load a .json file into this account</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <input type="file" id="importFile" accept="application/json" hidden>
+      <button class="settings-row" id="logoutBtn">
+        <span class="sr-ico">↩</span>
+        <span class="sr-body"><span class="sr-title">Log out</span><span class="sr-sub">Sign out on this device only</span></span>
+        <span class="sr-arrow">›</span>
+      </button>
       <button class="settings-row danger" id="wipeBtn">
         <span class="sr-ico">🗑</span>
-        <span class="sr-body"><span class="sr-title">Erase all data</span><span class="sr-sub">Permanently delete everything</span></span>
+        <span class="sr-body"><span class="sr-title">Erase cloud + local data</span><span class="sr-sub">Wipes this account's learning data</span></span>
         <span class="sr-arrow">›</span>
       </button>
     </div>
-    <p class="muted small" style="margin-top:10px">Everything is stored on this device. Export a backup and keep it safe, or import it on a new device to carry your progress with you.</p>
+    <p class="muted small" style="margin-top:10px">Your password is never shown to other users. Usernames appear on the login screen so you can pick yours.</p>
     <p class="app-footer">kritX · your personal learning OS</p>
   `;
 
@@ -1578,17 +1600,45 @@ function renderProfile() {
     Live.save();
     toast("Market keys saved");
   });
+  $("#syncNowBtn").addEventListener("click", async () => {
+    try {
+      await Store.pushToCloud();
+      toast("Synced to cloud ✓");
+    } catch (e) {
+      toast(e.message || "Sync failed");
+    }
+  });
   $("#exportBtn").addEventListener("click", exportBackup);
   $("#importBtn").addEventListener("click", () => $("#importFile").click());
-  $("#importFile").addEventListener("change", importBackup);
+  $("#importFile").addEventListener("change", async (e) => {
+    await importBackup(e);
+    try {
+      await Store.pushToCloud();
+      toast("Imported & synced");
+    } catch (err) {
+      /* local import still ok */
+    }
+  });
+  $("#logoutBtn").addEventListener("click", () =>
+    openConfirm("Log out?", "You'll need your password to sign back in on this device.", async () => {
+      await Sync.logout();
+      Store.clearLocal();
+      location.hash = "#/home";
+      location.reload();
+    })
+  );
   $("#wipeBtn").addEventListener("click", () =>
     openConfirm(
       "Erase everything?",
-      "All tasks and Codex entries on this device will be permanently deleted. Export a backup first if unsure.",
-      () => {
+      "This clears your learning data on this account (cloud + this device). Your username stays; you can start fresh after logging in again.",
+      async () => {
         Store.wipe();
+        try {
+          await Store.pushToCloud();
+        } catch (e) {}
         location.hash = "#/home";
-        location.reload();
+        router();
+        toast("Data erased");
       }
     )
   );
@@ -2178,19 +2228,23 @@ function exportBackup() {
 
 function importBackup(e) {
   const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      Store.importJson(reader.result);
-      toast("Backup restored");
-      router();
-      renderProfile();
-    } catch (err) {
-      toast(err.message || "Could not read that file.");
-    }
-  };
-  reader.readAsText(file);
+  if (!file) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        Store.importJson(reader.result);
+        toast("Backup restored");
+        router();
+        resolve();
+      } catch (err) {
+        toast(err.message || "Could not read that file.");
+        reject(err);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
 }
 
 function exportSkillCard(s) {
@@ -2236,8 +2290,148 @@ function showErr(id, msg) {
 }
 
 // ============================================================
-//  BOOT
+//  AUTH + BOOT
 // ============================================================
+
+function showAuthError(msg) {
+  const el = $("#authError");
+  if (!msg) {
+    el.classList.remove("show");
+    el.textContent = "";
+    return;
+  }
+  el.textContent = msg;
+  el.classList.add("show");
+}
+
+function setAuthMode(mode) {
+  const login = mode === "login";
+  $("#authLogin").hidden = !login;
+  $("#authRegister").hidden = login;
+  $("#authTitle").textContent = login ? "Welcome back" : "Create your account";
+  $("#authSub").textContent = login
+    ? "Pick your username and enter your private password. Your learning data syncs to every device you log into."
+    : "Choose a username others can see, and a password only you know. You'll use the same login on every laptop.";
+  showAuthError("");
+}
+
+async function refreshUserList() {
+  const list = $("#userList");
+  try {
+    const users = await Sync.listUsers();
+    $("#authOffline").hidden = true;
+    if (!users.length) {
+      list.innerHTML = `<p class="muted small">No accounts yet — create one below.</p>`;
+      return;
+    }
+    list.innerHTML = users
+      .map(
+        (u) => `<button type="button" class="user-chip" data-user="${esc(u.username)}">
+        <span class="user-chip-av">${esc(initials(u.name || u.username))}</span>
+        <span class="user-chip-body">
+          <span class="user-chip-name">${esc(u.username)}</span>
+          <span class="user-chip-sub">${esc(u.name || "")}</span>
+        </span>
+      </button>`
+      )
+      .join("");
+    $all(".user-chip", list).forEach((b) =>
+      b.addEventListener("click", () => {
+        $all(".user-chip", list).forEach((x) => x.classList.remove("sel"));
+        b.classList.add("sel");
+        $("#login-user").value = b.dataset.user;
+        $("#login-pass").focus();
+      })
+    );
+  } catch (e) {
+    list.innerHTML = `<p class="muted small">Couldn't load users.</p>`;
+    $("#authOffline").hidden = false;
+  }
+}
+
+function showLoginScreen() {
+  $("#onboard").hidden = false;
+  $("#app").hidden = true;
+  setAuthMode("login");
+  refreshUserList();
+
+  $("#showRegister").onclick = () => setAuthMode("register");
+  $("#showLogin").onclick = () => {
+    setAuthMode("login");
+    refreshUserList();
+  };
+
+  $("#loginBtn").onclick = async () => {
+    showAuthError("");
+    const username = $("#login-user").value.trim();
+    const password = $("#login-pass").value;
+    if (!username || !password) {
+      showAuthError("Enter your username and password.");
+      return;
+    }
+    $("#loginBtn").disabled = true;
+    try {
+      const data = await Sync.login({ username, password });
+      Store.applyRemoteProfile(data.profile);
+      toast("Synced · welcome back, " + (data.name || data.username));
+      startApp();
+    } catch (e) {
+      showAuthError(e.message || "Login failed.");
+    } finally {
+      $("#loginBtn").disabled = false;
+    }
+  };
+
+  $("#registerBtn").onclick = async () => {
+    showAuthError("");
+    const username = $("#reg-user").value.trim();
+    const name = $("#reg-name").value.trim() || username;
+    const password = $("#reg-pass").value;
+    const password2 = $("#reg-pass2").value;
+    if (!username || !password) {
+      showAuthError("Choose a username and password.");
+      return;
+    }
+    if (password !== password2) {
+      showAuthError("Passwords don't match.");
+      return;
+    }
+    if (password.length < 4) {
+      showAuthError("Password must be at least 4 characters.");
+      return;
+    }
+    $("#registerBtn").disabled = true;
+    try {
+      // Start fresh cloud profile (don't upload another user's local cache)
+      const fresh = {
+        version: 1,
+        name,
+        createdAt: new Date().toISOString(),
+        theme: "midnight",
+        onboarded: true,
+        settings: {},
+        tasks: [],
+        skills: [],
+        updatedAt: new Date().toISOString(),
+      };
+      const data = await Sync.register({ username, password, name, profile: fresh });
+      Store.applyRemoteProfile(data.profile);
+      toast("Account created · you're signed in");
+      startApp();
+    } catch (e) {
+      showAuthError(e.message || "Could not create account.");
+    } finally {
+      $("#registerBtn").disabled = false;
+    }
+  };
+
+  $("#login-pass").onkeydown = (e) => {
+    if (e.key === "Enter") $("#loginBtn").click();
+  };
+  $("#reg-pass2").onkeydown = (e) => {
+    if (e.key === "Enter") $("#registerBtn").click();
+  };
+}
 
 function startApp() {
   $("#onboard").hidden = true;
@@ -2251,31 +2445,36 @@ function startApp() {
   if (!location.hash) location.hash = "#/home";
   router();
 
-  // Pull the latest market data online (falls back to bundled/cached offline).
   Market.init(() => {
     const r = currentRoute();
     if (r.startsWith("market") || r.startsWith("field")) router();
   });
+
+  // Keep cloud copy fresh while the app is open
+  if (Sync.token()) {
+    setInterval(() => {
+      Store.pushToCloud().catch(() => {});
+    }, 60000);
+  }
 }
 
-function boot() {
+async function boot() {
   Store.load();
 
-  if (!Store.profile.onboarded) {
-    $("#onboard").hidden = false;
-    $("#app").hidden = true;
-    const start = () => {
-      Store.setName($("#ob-name").value || "");
+  // Already signed in? Pull latest from server, then open app
+  if (Sync.token()) {
+    try {
+      const profile = await Sync.pullProfile();
+      Store.applyRemoteProfile(profile);
       startApp();
-    };
-    $("#ob-start").addEventListener("click", start);
-    $("#ob-name").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") start();
-    });
-    return;
+      return;
+    } catch (e) {
+      // Token expired or server down — ask to log in again
+      Sync.setAuth(null);
+    }
   }
 
-  startApp();
+  showLoginScreen();
 }
 
 document.addEventListener("DOMContentLoaded", boot);

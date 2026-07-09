@@ -18,6 +18,7 @@ const DEFAULT_PROFILE = () => ({
   settings: {},
   tasks: [],
   skills: [],
+  updatedAt: null,
 });
 
 function uid() {
@@ -105,7 +106,67 @@ const Store = {
   },
 
   save() {
+    this.profile.updatedAt = new Date().toISOString();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    this._scheduleSync();
+  },
+
+  _syncTimer: null,
+  _scheduleSync() {
+    if (typeof Sync === "undefined" || !Sync.token()) return;
+    clearTimeout(this._syncTimer);
+    this._syncTimer = setTimeout(() => {
+      this.pushToCloud().catch(() => {});
+    }, 800);
+  },
+
+  async pushToCloud() {
+    if (typeof Sync === "undefined" || !Sync.token()) return null;
+    return Sync.pushProfile(this.profile);
+  },
+
+  async pullFromCloud() {
+    if (typeof Sync === "undefined" || !Sync.token()) return null;
+    const remote = await Sync.pullProfile();
+    if (remote && typeof remote === "object") {
+      this.profile = remote;
+      // re-run migrations without wiping
+      const d = DEFAULT_PROFILE();
+      for (const k of Object.keys(d)) {
+        if (this.profile[k] === undefined) this.profile[k] = d[k];
+      }
+      for (const t of this.profile.tasks || []) {
+        if (!Array.isArray(t.weekdays)) t.weekdays = [];
+        if (!Array.isArray(t.dailyLogs)) t.dailyLogs = [];
+        if (!t.streak) t.streak = { count: 0, lastDate: null };
+        t.loggedHours = this._sumHours(t);
+      }
+      this.profile.onboarded = true;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    }
+    return this.profile;
+  },
+
+  applyRemoteProfile(remote) {
+    if (!remote || typeof remote !== "object") return;
+    this.profile = remote;
+    const d = DEFAULT_PROFILE();
+    for (const k of Object.keys(d)) {
+      if (this.profile[k] === undefined) this.profile[k] = d[k];
+    }
+    for (const t of this.profile.tasks || []) {
+      if (!Array.isArray(t.weekdays)) t.weekdays = [];
+      if (!Array.isArray(t.dailyLogs)) t.dailyLogs = [];
+      if (!t.streak) t.streak = { count: 0, lastDate: null };
+      t.loggedHours = this._sumHours(t);
+    }
+    this.profile.onboarded = true;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+  },
+
+  clearLocal() {
+    this.profile = DEFAULT_PROFILE();
+    localStorage.removeItem(STORAGE_KEY);
   },
 
   // ---------- profile ----------

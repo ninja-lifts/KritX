@@ -68,7 +68,24 @@ npm install
 npm run serve
 ```
 
-Open **http://localhost:5050**. Your data is saved in that browser.
+Open **http://localhost:5050**.
+
+### Accounts & sync (multi-laptop)
+
+kritX now has **usernames + private passwords**:
+
+1. **Create an account** — pick a username (visible on the login list) and a password **only you know**.
+2. On **any other PC**, run the same server (or open the same hosted URL), pick your username from the list, enter your password → your tasks & Codex load.
+3. Every change auto-syncs to the server after a short delay (and every minute while the app is open). Profile → **Sync now** forces a push.
+
+**Passwords** are stored as secure hashes (`scrypt`) on the server — never returned in the user list and never shown to other users. Only **usernames** (and display names) appear on the login screen.
+
+**Important:** The sync database lives in the `data/` folder on the machine that runs `npm run serve`. For two laptops to share data:
+
+- **Option A (same Wi‑Fi):** Run `npm run serve` on one PC, open `http://THAT-PC-IP:5050` from the other.
+- **Option B (anywhere):** Host the app on a VPS / cloud (Railway, Render, a home always-on PC with port forward) and open that URL from every laptop. Keep the `data/` folder backed up.
+
+Do **not** commit `data/` to GitHub (it's gitignored) — that folder holds password hashes and private learning data.
 
 ---
 

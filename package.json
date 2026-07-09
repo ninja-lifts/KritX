@@ -4,7 +4,8 @@
   "description": "kritX - a personal learning OS that turns tasks into a revisitable body of skills. Offline-first, stores all data on-device.",
   "private": true,
   "scripts": {
-    "serve": "node scripts/dev-server.js",
+    "serve": "node server/index.js",
+    "serve:static": "node scripts/dev-server.js",
     "cap:add": "cap add android",
     "cap:sync": "cap sync android",
     "apk:debug": "cap sync android && cd android && gradlew.bat assembleDebug"
