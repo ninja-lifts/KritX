@@ -222,6 +222,7 @@ textarea { resize: vertical; min-height: 64px; }
   .app { display: flex; height: 100vh; overflow: hidden; padding: 0; }
 
   .tabbar { display: none; }
+  .task-dock { bottom: 16px; }
 
   .sidebar {
     display: flex; flex-direction: column;
@@ -441,6 +442,45 @@ textarea { resize: vertical; min-height: 64px; }
 .small { font-size: 12px; }
 
 .detail-footer { margin-top: 24px; display: flex; flex-direction: column; gap: 10px; }
+.detail-head-top {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  margin-bottom: 10px;
+}
+.detail-head-top .chip-row { flex: 1; }
+
+.task-dock {
+  position: sticky;
+  bottom: calc(78px + var(--safe-bottom));
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 20px 0 8px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(11, 14, 26, 0.92);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35);
+}
+.task-dock .btn { min-height: 44px; font-size: 13px; }
+.task-dock #dockComplete { grid-column: 1 / -1; }
+.task-dock #dockSave:only-of-type + #dockComplete,
+.task-dock #dockComplete:first-child { grid-column: 1 / -1; }
+
+.log-row {
+  width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface);
+  border-radius: 12px; padding: 12px 14px; color: inherit;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.log-row:hover, .log-row:focus-visible {
+  border-color: var(--teal); transform: translateY(-1px);
+}
+.log-row.log-today { border-color: rgba(45, 212, 191, 0.35); }
+.log-edit-hint {
+  float: right; font-size: 11px; color: var(--text-muted); font-weight: 600;
+}
 .footer-row { display: flex; gap: 10px; }
 .footer-row .btn { flex: 1; }
 

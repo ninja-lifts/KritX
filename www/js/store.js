@@ -329,9 +329,42 @@ const Store = {
   updateTask(id, patch) {
     const t = this.getTask(id);
     if (!t) return null;
-    Object.assign(t, patch);
+    if (patch.title !== undefined) t.title = String(patch.title).trim();
+    if (patch.category !== undefined) t.category = String(patch.category).trim() || "General";
+    if (patch.tags !== undefined) t.tags = patch.tags;
+    if (patch.difficulty !== undefined) t.difficulty = Number(patch.difficulty) || 3;
+    if (patch.priority !== undefined) t.priority = patch.priority || "medium";
+    if (patch.goalDays !== undefined) {
+      t.goalDays = Number(patch.goalDays) || 0;
+      if (t.goalDays > 0 && t.createdAt) {
+        const d = new Date(t.createdAt + "T00:00:00");
+        d.setDate(d.getDate() + t.goalDays);
+        t.dueDate = d.toISOString().slice(0, 10);
+      } else if (!t.goalDays) {
+        t.dueDate = patch.dueDate !== undefined ? patch.dueDate : t.dueDate;
+      }
+    }
+    if (patch.goalHours !== undefined) t.goalHours = Number(patch.goalHours) || 0;
+    if (patch.weekdays !== undefined)
+      t.weekdays = (patch.weekdays || []).map(Number).filter((n) => n >= 0 && n <= 6);
+    if (patch.dueDate !== undefined) t.dueDate = patch.dueDate;
+    if (patch.notes !== undefined) t.notes = String(patch.notes).trim();
+    if (patch.status !== undefined) t.status = patch.status;
     this.save();
     return t;
+  },
+
+  updateDailyLog(taskId, logId, patch = {}) {
+    const t = this.getTask(taskId);
+    if (!t) return null;
+    const log = (t.dailyLogs || []).find((l) => l.id === logId);
+    if (!log) return null;
+    if (patch.sources !== undefined) log.sources = patch.sources;
+    if (patch.minutes !== undefined) log.minutes = Math.max(0, Math.round(Number(patch.minutes) || 0));
+    if (patch.note !== undefined) log.note = String(patch.note).trim();
+    t.loggedHours = this._sumHours(t);
+    this.save();
+    return log;
   },
 
   deleteTask(id) {

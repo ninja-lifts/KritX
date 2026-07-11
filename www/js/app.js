@@ -430,7 +430,7 @@ function taskCard(t) {
             : `<span class="muted small">not scheduled today</span>`
         }
         <button class="btn btn-teal btn-sm" data-start="${t.id}">${
-              studied ? "+ Add more" : "Start today"
+              studied ? "Edit today" : "Save today"
             }</button>
       </div>`
           : ""
@@ -492,10 +492,13 @@ function renderTaskDetail(id) {
     <button class="back-btn" data-back>← Tasks</button>
 
     <div class="detail-head reveal">
-      <div class="chip-row">
-        <span class="chip">${esc(t.category)}</span>
-        <span class="chip ${pri.cls}">${pri.label}</span>
-        <span class="chip">${difDots(t.difficulty)} difficulty</span>
+      <div class="detail-head-top">
+        <div class="chip-row">
+          <span class="chip">${esc(t.category)}</span>
+          <span class="chip ${pri.cls}">${pri.label}</span>
+          <span class="chip">${difDots(t.difficulty)} difficulty</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="editTaskBtn" type="button">✎ Edit task</button>
       </div>
       <h2 class="detail-title">${esc(t.title)}</h2>
       ${(t.tags || []).length ? `<div class="tag-row">${t.tags
@@ -520,7 +523,7 @@ function renderTaskDetail(id) {
     ${
       t.status === "active"
         ? `<button class="btn btn-primary btn-block start-today-big" id="startTodayBtn">${
-            studied ? "＋ Add to today's study" : "▶ Start today"
+            studied ? "📝 Edit today's work" : "📝 Save today's work"
           }</button>
            <p class="start-hint">${
              studied
@@ -564,16 +567,33 @@ function renderTaskDetail(id) {
     </div>
 
     <!-- daily study log -->
-    <div class="section-head"><p class="section-label">Daily study log</p></div>
-    <div class="card-list">
+    <div class="section-head">
+      <p class="section-label">Daily study log</p>
+      ${
+        t.status === "active"
+          ? `<button class="link-btn" type="button" id="logTodayBtn">+ Log today</button>`
+          : ""
+      }
+    </div>
+    <div class="card-list" id="dailyLogList">
       ${
         t.dailyLogs && t.dailyLogs.length
           ? [...t.dailyLogs]
               .sort((a, b) => (a.date < b.date ? 1 : -1))
-              .map(dailyLogRow)
+              .map((l) => dailyLogRow(l, t.id))
               .join("")
-          : `<p class="muted">Nothing logged yet. Tap “Start today” to record where you're studying from.</p>`
+          : `<p class="muted">Nothing logged yet. Tap <b>Save today's work</b> below to record what you studied.</p>`
       }
+    </div>
+
+    <div class="task-dock" id="taskDock">
+      ${
+        t.status === "active"
+          ? `<button class="btn btn-teal" type="button" id="dockSave">📝 Save today's work</button>`
+          : ""
+      }
+      <button class="btn btn-primary" type="button" id="dockComplete">📖 Complete → Codex</button>
+      <button class="btn btn-ghost" type="button" id="dockEdit">✎ Edit</button>
     </div>
 
     <div class="detail-footer">
@@ -595,6 +615,20 @@ function renderTaskDetail(id) {
   const startBtn = $("#startTodayBtn");
   if (startBtn) startBtn.addEventListener("click", () => openDailyModal(t.id));
 
+  $("#editTaskBtn").addEventListener("click", () => openEditTaskModal(t.id));
+  $("#dockEdit").addEventListener("click", () => openEditTaskModal(t.id));
+  const dockSave = $("#dockSave");
+  if (dockSave) dockSave.addEventListener("click", () => openDailyModal(t.id));
+  const logTodayBtn = $("#logTodayBtn");
+  if (logTodayBtn) logTodayBtn.addEventListener("click", () => openDailyModal(t.id));
+  $("#dockComplete").addEventListener("click", () => openCompleteModal(t.id));
+
+  $all("[data-edit-log]", view).forEach((row) =>
+    row.addEventListener("click", () =>
+      openDailyModal(t.id, row.dataset.editLog)
+    )
+  );
+
   // timer
   setupTimer(t.id);
 
@@ -615,27 +649,31 @@ function renderTaskDetail(id) {
   });
 }
 
-function dailyLogRow(l) {
+function dailyLogRow(l, taskId) {
   const srcs =
     l.sources && l.sources.length
       ? `<div class="log-sources">${l.sources
           .map((s) => {
             const label = [s.type, s.title].filter(Boolean).join(" · ") || "Source";
             return s.url
-              ? `<a class="log-src" href="${esc(s.url)}" target="_blank" rel="noopener">📖 ${esc(
+              ? `<a class="log-src" href="${esc(s.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">📖 ${esc(
                   label
                 )} ↗</a>`
               : `<span class="log-src">📖 ${esc(label)}</span>`;
           })
           .join("")}</div>`
       : "";
-  return `<div class="session-row">
+  const today = todayStr();
+  const isToday = l.date === today;
+  return `<button type="button" class="session-row log-row${isToday ? " log-today" : ""}" data-edit-log="${esc(
+    l.id
+  )}" title="Tap to edit">
     <div class="log-head"><b>${esc(fmtDate(l.date))}</b>${
     l.minutes ? ` · ${fmtHours(l.minutes / 60)}h` : ""
-  }</div>
-    ${srcs}
+  }${isToday ? ` <span class="studied-tag">today</span>` : ""}<span class="log-edit-hint">✎ edit</span></div>
+    ${srcs || `<div class="muted small">No sources — tap to add</div>`}
     ${l.note ? `<div class="muted small">${esc(l.note)}</div>` : ""}
-  </div>`;
+  </button>`;
 }
 
 function taskCalendar(t) {
@@ -1799,6 +1837,122 @@ function openNewTaskModal(prefill = {}) {
   });
 }
 
+function openEditTaskModal(taskId) {
+  const t = Store.getTask(taskId);
+  if (!t) return;
+  const { close } = openModal(
+    `
+    <h2 class="modal-title">Edit task</h2>
+    <p class="modal-sub">Change the goal, schedule, or details. Your daily study logs are kept.</p>
+    <div class="err" id="etErr"></div>
+    <div class="field"><label>Title</label>
+      <input type="text" id="et-title" value="${esc(t.title)}"></div>
+    <div class="field"><label>Category</label>
+      <input type="text" id="et-cat" value="${esc(t.category)}"></div>
+    <div class="field"><label>Tags (optional)</label>
+      <input type="text" id="et-tags" value="${esc((t.tags || []).join(", "))}"></div>
+    <div class="grid2">
+      <div class="field"><label>Timeline — days to finish</label>
+        <input type="number" id="et-days" min="1" value="${t.goalDays || ""}"></div>
+      <div class="field"><label>Total hours goal</label>
+        <input type="number" id="et-hours" min="0" step="0.5" value="${t.goalHours || ""}"></div>
+    </div>
+    <p class="due-preview ${t.dueDate ? "show" : ""}" id="et-due">${
+      t.dueDate
+        ? `🎯 Target: finish by ${fmtDate(t.dueDate)}`
+        : "Pick days to see the target date."
+    }</p>
+    <div class="field">
+      <label>Which weekdays will you work on this?</label>
+      <div class="wd-picker" id="et-wd">
+        ${WEEKDAYS.map(
+          (d, i) =>
+            `<button type="button" class="wd${
+              (t.weekdays || []).includes(i) ? " sel" : ""
+            }" data-wd="${i}">${d}</button>`
+        ).join("")}
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>Priority</label>
+        <select id="et-pri">
+          <option value="low" ${t.priority === "low" ? "selected" : ""}>Low</option>
+          <option value="medium" ${t.priority === "medium" ? "selected" : ""}>Medium</option>
+          <option value="high" ${t.priority === "high" ? "selected" : ""}>High</option>
+        </select>
+      </div>
+      <div class="field"><label>Difficulty</label>
+        <select id="et-diff">
+          ${[1, 2, 3, 4, 5]
+            .map(
+              (n) =>
+                `<option value="${n}" ${
+                  Number(t.difficulty) === n ? "selected" : ""
+                }>${n}${n === 1 ? " · easy" : n === 5 ? " · hard" : ""}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-close>Cancel</button>
+      <button class="btn btn-primary" id="et-save">Save changes</button>
+    </div>
+  `,
+    { wide: true }
+  );
+
+  $("[data-close]").addEventListener("click", close);
+  $all("#et-wd .wd").forEach((b) =>
+    b.addEventListener("click", () => b.classList.toggle("sel"))
+  );
+
+  const daysInput = $("#et-days");
+  const duePrev = $("#et-due");
+  const updateDue = () => {
+    const n = Number(daysInput.value);
+    if (n > 0 && t.createdAt) {
+      const d = new Date(t.createdAt + "T00:00:00");
+      d.setDate(d.getDate() + n);
+      duePrev.textContent = `🎯 Target: finish by ${d.toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      })}`;
+      duePrev.classList.add("show");
+    } else {
+      duePrev.textContent = "Pick days to see the target date.";
+      duePrev.classList.remove("show");
+    }
+  };
+  daysInput.addEventListener("input", updateDue);
+
+  $("#et-save").addEventListener("click", () => {
+    const title = $("#et-title").value.trim();
+    if (!title) {
+      showErr("etErr", "Give the task a title.");
+      return;
+    }
+    const weekdays = $all("#et-wd .wd.sel").map((b) => Number(b.dataset.wd));
+    Store.updateTask(taskId, {
+      title,
+      category: $("#et-cat").value.trim() || "General",
+      tags: $("#et-tags")
+        .value.split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      goalDays: $("#et-days").value,
+      goalHours: $("#et-hours").value,
+      weekdays,
+      priority: $("#et-pri").value,
+      difficulty: $("#et-diff").value,
+    });
+    close();
+    toast("Task updated ✓");
+    renderTaskDetail(taskId);
+  });
+}
+
 function openContinueFromCodex(skill) {
   const next = Store.nextPathSkill(skill);
   const { close } = openModal(`
@@ -1893,14 +2047,22 @@ function sourceRowHtml(prefill = {}) {
     </div>`;
 }
 
-function openDailyModal(taskId) {
+function openDailyModal(taskId, logId = null) {
   const t = Store.getTask(taskId);
   if (!t) return;
+  const existing = logId
+    ? (t.dailyLogs || []).find((l) => l.id === logId)
+    : (t.dailyLogs || []).find((l) => l.date === todayStr());
+  const editing = Boolean(existing);
   const prev = Store.allResources();
   const { close } = openModal(
     `
-    <h2 class="modal-title">Today's study</h2>
-    <p class="modal-sub">${esc(t.title)} — where are you learning from today?</p>
+    <h2 class="modal-title">${editing ? "Edit study log" : "Today's study"}</h2>
+    <p class="modal-sub">${esc(t.title)} — ${
+      editing
+        ? `update what you studied on ${fmtDate(existing.date)}`
+        : "where are you learning from today?"
+    }</p>
 
     ${
       prev.length
@@ -1918,18 +2080,28 @@ function openDailyModal(taskId) {
         : ""
     }
 
-    <p class="section-label" style="margin:14px 0 8px">Sources for today</p>
-    <div id="resList">${sourceRowHtml()}</div>
+    <p class="section-label" style="margin:14px 0 8px">Sources for ${editing ? "this day" : "today"}</p>
+    <div id="resList">${
+      existing && existing.sources && existing.sources.length
+        ? existing.sources.map((s) => sourceRowHtml(s)).join("")
+        : sourceRowHtml()
+    }</div>
     <button type="button" class="btn btn-ghost btn-sm" id="addRes">＋ Add another source</button>
 
     <div class="grid2" style="margin-top:16px">
-      <div class="field"><label>Minutes today (optional)</label><input type="number" id="dl-min" min="0" placeholder="e.g. 45"></div>
-      <div class="field"><label>Note (optional)</label><input type="text" id="dl-note" placeholder="What did you cover?"></div>
+      <div class="field"><label>Minutes (optional)</label><input type="number" id="dl-min" min="0" placeholder="e.g. 45" value="${
+        existing && existing.minutes ? existing.minutes : ""
+      }"></div>
+      <div class="field"><label>Note (optional)</label><input type="text" id="dl-note" placeholder="What did you cover?" value="${esc(
+        (existing && existing.note) || ""
+      )}"></div>
     </div>
 
     <div class="modal-actions">
       <button class="btn btn-ghost" data-close>Cancel</button>
-      <button class="btn btn-primary" id="dl-save">Save today's study</button>
+      <button class="btn btn-primary" id="dl-save">${
+        editing ? "Save changes" : "Save today's work"
+      }</button>
     </div>
   `,
     { wide: true }
@@ -1986,13 +2158,17 @@ function openDailyModal(taskId) {
       .filter((s) => s.type || s.title || s.url);
     const minutes = $("#dl-min").value;
     const note = $("#dl-note").value;
-    if (!sources.length && !Number(minutes)) {
-      toast("Add a source or some minutes first.");
+    if (!sources.length && !Number(minutes) && !note.trim()) {
+      toast("Add a source, minutes, or a note first.");
       return;
     }
-    Store.addDailyStudy(taskId, { sources, minutes, note });
+    if (editing && existing) {
+      Store.updateDailyLog(taskId, existing.id, { sources, minutes, note });
+    } else {
+      Store.addDailyStudy(taskId, { sources, minutes, note });
+    }
     close();
-    toast("Logged today's study ✓");
+    toast(editing ? "Study log updated ✓" : "Today's work saved ✓");
     if (currentRoute().startsWith("task/")) renderTaskDetail(taskId);
     else router();
   });
