@@ -83,7 +83,7 @@ kritX now has **usernames + private passwords**:
 **Important:** The sync database lives in the `data/` folder on the machine that runs `npm run serve`. For two laptops to share data:
 
 - **Option A (same Wi‑Fi):** Run `npm run serve` on one PC, open `http://THAT-PC-IP:5050` from the other.
-- **Option B (anywhere):** Host the app on a VPS / cloud (Railway, Render, a home always-on PC with port forward) and open that URL from every laptop. Keep the `data/` folder backed up.
+- **Option B (anywhere — recommended):** Put kritX on the web so you only need **one link**, no install on each device. See **[DEPLOY.md](DEPLOY.md)** for step-by-step Render deploy from GitHub (~5 min). You get a URL like `https://kritx.onrender.com` — bookmark it on phone and laptop, log in with username + password, data syncs automatically.
 
 Do **not** commit `data/` to GitHub (it's gitignored) — that folder holds password hashes and private learning data.
 

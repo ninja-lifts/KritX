@@ -190,6 +190,11 @@ async function handleApi(req, res, pathname) {
   }
 
   // Public: list usernames only (no passwords, no hashes)
+  if (pathname === "/api/health" && req.method === "GET") {
+    send(res, 200, { ok: true, service: "kritX", users: listUsers().length });
+    return;
+  }
+
   if (pathname === "/api/users" && req.method === "GET") {
     send(res, 200, { users: listUsers() });
     return;

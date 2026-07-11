@@ -1,9 +1,11 @@
 {
   "name": "kritx-learning-os",
   "version": "1.0.0",
-  "description": "kritX - a personal learning OS that turns tasks into a revisitable body of skills. Offline-first, stores all data on-device.",
+  "description": "kritX - personal learning OS with tasks, Codex, and cloud sync. Visit a URL, log in, no install.",
   "private": true,
+  "engines": { "node": ">=18" },
   "scripts": {
+    "start": "node server/index.js",
     "serve": "node server/index.js",
     "serve:static": "node scripts/dev-server.js",
     "cap:add": "cap add android",

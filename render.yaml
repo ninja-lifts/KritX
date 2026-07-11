@@ -1,0 +1,19 @@
+# Render.com — one-click deploy from GitHub
+# After connect: you get a public URL like https://kritx.onrender.com
+# Persistent disk keeps user accounts + learning data across restarts.
+
+services:
+  - type: web
+    name: kritx
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+    disk:
+      name: kritx-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
