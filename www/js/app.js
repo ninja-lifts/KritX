@@ -81,6 +81,21 @@ function fmtDate(iso) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function syncToast(result) {
+  if (!result) return;
+  if (result.pulled) toast("Downloaded latest from server → saved locally ☁");
+  else if (result.pushed) toast("Uploaded this PC's data to the transfer mailbox ☁");
+}
+
+function relTime(iso) {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60000) return "just now";
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
+  if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
+  return fmtDate(iso.slice(0, 10));
+}
+
 function difDots(n) {
   return "●".repeat(n) + "○".repeat(5 - n);
 }
@@ -1496,6 +1511,10 @@ function renderProfile() {
   const hours = Store.totalHours();
   const rank = learnerRank(p.skills.length, hours);
   const top = topValueSkill();
+  const backupInfo = Sync.username() ? Store.getLocalSaveInfo(Sync.username()) : null;
+  const autoBackupLine = backupInfo
+    ? `${backupInfo.tasks} tasks · ${backupInfo.skills} skills · local ${relTime(backupInfo.savedAt)}`
+    : "local JSON on this device";
 
   view.innerHTML = `
     <div class="profile-hero">
@@ -1505,7 +1524,7 @@ function renderProfile() {
       <div class="hero-rank">◆ Lv ${rank.level} · ${esc(rank.name)}</div>
       <p class="hero-since">${
         Sync.username()
-          ? `@${esc(Sync.username())} · synced account`
+          ? `@${esc(Sync.username())} · data lives on this device`
           : "Learning since " + esc((p.createdAt || "").slice(0, 10))
       }</p>
       <div class="hero-progress">
@@ -1523,8 +1542,10 @@ function renderProfile() {
     <div class="sync-banner ${Sync.token() ? "ok" : ""}">
       ${
         Sync.token()
-          ? `🟢 Signed in as <b>@${esc(Sync.username())}</b> — your Codex syncs to every device you log into with this password.`
-          : `⚪ Not signed in — log in to sync across laptops.`
+          ? `🟢 <b>@${esc(Sync.username())}</b> — tasks & Codex are <b>local</b> on this PC. The website only transfers the latest copy between devices${
+              autoBackupLine ? ` · ${autoBackupLine}` : ""
+            }.`
+          : `⚪ Not signed in — log in to open your local save and transfer mailbox.`
       }
     </div>
 
@@ -1592,7 +1613,7 @@ function renderProfile() {
     <div class="settings-card">
       <button class="settings-row" id="syncNowBtn">
         <span class="sr-ico">☁</span>
-        <span class="sr-body"><span class="sr-title">Sync now</span><span class="sr-sub">Push this device's data to the server</span></span>
+        <span class="sr-body"><span class="sr-title">Transfer sync now</span><span class="sr-sub">Upload this PC or download if another PC is newer</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="exportBtn">
@@ -1617,7 +1638,7 @@ function renderProfile() {
         <span class="sr-arrow">›</span>
       </button>
     </div>
-    <p class="muted small" style="margin-top:10px">Your password is never shown to other users. Usernames appear on the login screen so you can pick yours.</p>
+    <p class="muted small" style="margin-top:10px">Your learning data stays in this browser as local JSON. The link/server is only for opening the site and moving the newest copy to your other devices. After a free-host redeploy, re-create the same username on this PC once — local data uploads again.</p>
     <p class="app-footer">kritX · your personal learning OS</p>
   `;
 
@@ -1640,8 +1661,10 @@ function renderProfile() {
   });
   $("#syncNowBtn").addEventListener("click", async () => {
     try {
-      await Store.pushToCloud();
-      toast("Synced to cloud ✓");
+      const { sync } = await Store.pullFromCloud();
+      if (sync) syncToast(sync);
+      else toast("Synced ✓");
+      renderProfile();
     } catch (e) {
       toast(e.message || "Sync failed");
     }
@@ -1652,13 +1675,17 @@ function renderProfile() {
     await importBackup(e);
     try {
       await Store.pushToCloud();
-      toast("Imported & synced");
+      toast("Imported & uploaded to server ✓");
     } catch (err) {
-      /* local import still ok */
+      toast("Imported locally ✓");
     }
+    router();
   });
   $("#logoutBtn").addEventListener("click", () =>
-    openConfirm("Log out?", "You'll need your password to sign back in on this device.", async () => {
+    openConfirm(
+      "Log out?",
+      "You'll need your password again. Your local tasks & Codex stay on this device.",
+      async () => {
       await Sync.logout();
       Store.clearLocal();
       location.hash = "#/home";
@@ -1668,7 +1695,7 @@ function renderProfile() {
   $("#wipeBtn").addEventListener("click", () =>
     openConfirm(
       "Erase everything?",
-      "This clears your learning data on this account (cloud + this device). Your username stays; you can start fresh after logging in again.",
+      "This deletes your local JSON on this device and clears the transfer mailbox. Your login username can stay — you can start fresh.",
       async () => {
         Store.wipe();
         try {
@@ -1676,7 +1703,7 @@ function renderProfile() {
         } catch (e) {}
         location.hash = "#/home";
         router();
-        toast("Data erased");
+        toast("Local data erased");
       }
     )
   );
@@ -2486,43 +2513,79 @@ function setAuthMode(mode) {
   $("#authRegister").hidden = login;
   $("#authTitle").textContent = login ? "Welcome back" : "Create your account";
   $("#authSub").textContent = login
-    ? "Pick your username and enter your private password. Your learning data syncs to every device you log into."
-    : "Choose a username others can see, and a password only you know. You'll use the same login on every laptop.";
+    ? "Open the website · data stays on this device · server only transfers between PCs."
+    : "Create a username + password. Your Codex is saved locally; the server is just a mailbox.";
   showAuthError("");
 }
 
 async function refreshUserList() {
   const list = $("#userList");
+  const localUsers = Store.listLocalUsers();
+  let serverUsers = [];
   try {
-    const users = await Sync.listUsers();
+    serverUsers = await Sync.listUsers();
     $("#authOffline").hidden = true;
-    if (!users.length) {
-      list.innerHTML = `<p class="muted small">No accounts yet — create one below.</p>`;
-      return;
-    }
-    list.innerHTML = users
-      .map(
-        (u) => `<button type="button" class="user-chip" data-user="${esc(u.username)}">
-        <span class="user-chip-av">${esc(initials(u.name || u.username))}</span>
-        <span class="user-chip-body">
-          <span class="user-chip-name">${esc(u.username)}</span>
-          <span class="user-chip-sub">${esc(u.name || "")}</span>
-        </span>
-      </button>`
-      )
-      .join("");
-    $all(".user-chip", list).forEach((b) =>
-      b.addEventListener("click", () => {
-        $all(".user-chip", list).forEach((x) => x.classList.remove("sel"));
-        b.classList.add("sel");
-        $("#login-user").value = b.dataset.user;
-        $("#login-pass").focus();
-      })
-    );
   } catch (e) {
-    list.innerHTML = `<p class="muted small">Couldn't load users.</p>`;
     $("#authOffline").hidden = false;
   }
+
+  const byName = new Map();
+  for (const u of serverUsers) {
+    byName.set(u.username, {
+      username: u.username,
+      name: u.name || u.username,
+      onServer: true,
+      local: false,
+    });
+  }
+  for (const u of localUsers) {
+    const prev = byName.get(u.username) || {};
+    byName.set(u.username, {
+      username: u.username,
+      name: u.name || prev.name || u.username,
+      onServer: Boolean(prev.onServer),
+      local: true,
+      tasks: u.tasks || 0,
+      skills: u.skills || 0,
+    });
+  }
+
+  const users = Array.from(byName.values()).sort((a, b) =>
+    a.username.localeCompare(b.username)
+  );
+
+  if (!users.length) {
+    list.innerHTML = `<p class="muted small">No accounts yet — create one below. After a host redeploy, create the same username again on this PC to restore local data.</p>`;
+    return;
+  }
+
+  list.innerHTML = users
+    .map((u) => {
+      const badge = u.local
+        ? u.onServer
+          ? "local + transfer"
+          : "local only · re-create account if login fails"
+        : "on server";
+      const meta =
+        u.local && (u.tasks || u.skills)
+          ? ` · ${u.tasks || 0} tasks`
+          : "";
+      return `<button type="button" class="user-chip" data-user="${esc(u.username)}">
+        <span class="user-chip-av">${esc(initials(u.name || u.username))}</span>
+        <span class="user-chip-body">
+          <span class="user-chip-name">@${esc(u.username)}</span>
+          <span class="user-chip-meta">${esc(badge)}${esc(meta)}</span>
+        </span>
+      </button>`;
+    })
+    .join("");
+
+  $all(".user-chip", list).forEach((b) =>
+    b.addEventListener("click", () => {
+      $("#login-user").value = b.dataset.user;
+      $("#login-pass").focus();
+    })
+  );
 }
 
 function showLoginScreen() {
@@ -2548,11 +2611,26 @@ function showLoginScreen() {
     $("#loginBtn").disabled = true;
     try {
       const data = await Sync.login({ username, password });
-      Store.applyRemoteProfile(data.profile);
-      toast("Synced · welcome back, " + (data.name || data.username));
+      const sync = await Store.syncAfterAuth(
+        data.username,
+        data.name || data.username,
+        data.profile
+      );
+      syncToast(sync);
+      if (!sync.pulled && !sync.pushed) {
+        toast("Welcome back, " + (data.name || data.username));
+      }
       startApp();
     } catch (e) {
-      showAuthError(e.message || "Login failed.");
+      const local = Store.peekLocalProfile(username);
+      if (local && !Store._isEmpty(local)) {
+        showAuthError(
+          (e.message || "Login failed.") +
+            " Tip: if the host redeployed, Create account with the same username — your local Codex will upload again."
+        );
+      } else {
+        showAuthError(e.message || "Login failed.");
+      }
     } finally {
       $("#loginBtn").disabled = false;
     }
@@ -2578,21 +2656,29 @@ function showLoginScreen() {
     }
     $("#registerBtn").disabled = true;
     try {
-      // Start fresh cloud profile (don't upload another user's local cache)
-      const fresh = {
-        version: 1,
-        name,
-        createdAt: new Date().toISOString(),
-        theme: "midnight",
-        onboarded: true,
-        settings: {},
-        tasks: [],
-        skills: [],
-        updatedAt: new Date().toISOString(),
-      };
-      const data = await Sync.register({ username, password, name, profile: fresh });
-      Store.applyRemoteProfile(data.profile);
-      toast("Account created · you're signed in");
+      // Prefer existing local JSON for this username (survives host redeploys)
+      const existing = Store.peekLocalProfile(username);
+      const profile = existing
+        ? { ...existing, name: name || existing.name || username, onboarded: true }
+        : {
+            version: 1,
+            name,
+            createdAt: new Date().toISOString(),
+            theme: "midnight",
+            onboarded: true,
+            settings: {},
+            tasks: [],
+            skills: [],
+            updatedAt: new Date().toISOString(),
+          };
+      const data = await Sync.register({ username, password, name, profile });
+      const sync = await Store.syncAfterAuth(data.username, name, data.profile);
+      syncToast(sync);
+      if (existing && !Store._isEmpty(existing)) {
+        toast("Account ready · local Codex restored & transferred ☁");
+      } else if (!sync.pulled && !sync.pushed) {
+        toast("Account created · you're signed in");
+      }
       startApp();
     } catch (e) {
       showAuthError(e.message || "Could not create account.");
@@ -2626,26 +2712,27 @@ function startApp() {
     if (r.startsWith("market") || r.startsWith("field")) router();
   });
 
-  // Keep cloud copy fresh while the app is open
+  // Sync local ↔ server every 5 min while app is open
   if (Sync.token()) {
     setInterval(() => {
-      Store.pushToCloud().catch(() => {});
-    }, 60000);
+      Store.pullFromCloud().catch(() => {});
+    }, 5 * 60 * 1000);
   }
 }
 
 async function boot() {
   Store.load();
 
-  // Already signed in? Pull latest from server, then open app
   if (Sync.token()) {
     try {
-      const profile = await Sync.pullProfile();
-      Store.applyRemoteProfile(profile);
+      await Sync.request("/api/me");
+      const remote = await Sync.pullProfile();
+      const username = Sync.username();
+      const sync = await Store.syncAfterAuth(username, null, remote);
       startApp();
+      syncToast(sync);
       return;
     } catch (e) {
-      // Token expired or server down — ask to log in again
       Sync.setAuth(null);
     }
   }

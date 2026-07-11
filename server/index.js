@@ -1,12 +1,14 @@
 /**
  * kritX sync server
  *
- * Serves the app (www/) and a small API for multi-user accounts.
- * Passwords are stored as scrypt hashes only — never returned to clients.
- * Each user's learning data lives in data/users/<username>/profile.json
- * and syncs to every device that logs in with that username + password.
+ * Serves the website (www/) and a small API:
+ *  - login / register (password hashes only)
+ *  - profile GET/PUT as a TRANSFER MAILBOX between devices
  *
- * Run:  npm run serve
+ * Learning data is LOCAL-FIRST on each browser. The server copy is temporary
+ * relay storage so PC A can upload and PC B can download.
+ *
+ * Run:  npm start
  * Open: http://localhost:5050
  */
 
@@ -231,7 +233,7 @@ async function handleApi(req, res, pathname) {
     const profile = body.profile && typeof body.profile === "object"
       ? { ...body.profile, name: name || body.profile.name || username, onboarded: true }
       : defaultProfile(name || username);
-    profile.updatedAt = new Date().toISOString();
+    if (!profile.updatedAt) profile.updatedAt = new Date().toISOString();
     writeJson(profilePath(username), profile);
     const token = createSession(username);
     send(res, 200, {
@@ -318,12 +320,12 @@ async function handleApi(req, res, pathname) {
       send(res, 400, { error: "Missing profile." });
       return;
     }
-    // Never accept password fields into profile
+    // Keep the client's updatedAt so local-vs-server compare stays honest
     const profile = { ...body.profile };
     delete profile.password;
     delete profile.passwordHash;
     profile.onboarded = true;
-    profile.updatedAt = new Date().toISOString();
+    if (!profile.updatedAt) profile.updatedAt = new Date().toISOString();
     writeJson(profilePath(sess.username), profile);
     // keep display name in meta in sync
     const meta = readJson(metaPath(sess.username), null);

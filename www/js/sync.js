@@ -1,7 +1,7 @@
 /*
- * Sync — talks to the kritX server for multi-user login + cloud profile sync.
- * Passwords are sent only over the login/register request; the server stores
- * hashes. Tokens live in localStorage so you stay signed in on this device.
+ * Sync — website auth + transfer mailbox.
+ * Passwords go only to login/register. Learning data is local-first;
+ * profile push/pull moves the newest copy between devices.
  */
 
 const AUTH_KEY = "kritx.auth.v1";

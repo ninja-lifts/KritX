@@ -1,13 +1,16 @@
 /*
- * Store — the on-device save file.
+ * Store — LOCAL-FIRST learning data + server as transfer mailbox.
  *
- * Everything you do in Codex is kept in one JSON document in the device's
- * local storage. It survives closing the app, restarting the phone, etc.
- * (just like a game save). You can also export it to a file and import it
- * back on another device.
+ * Source of truth on each device:
+ *   kritx.user.<username>  →  full JSON (tasks, Codex, settings)
+ *
+ * Server profile.json is only a mailbox to move data between PCs.
+ * Empty server copies never overwrite real local data (e.g. after redeploy).
  */
 
-const STORAGE_KEY = "codex.profile.v1";
+const STORAGE_KEY = "codex.profile.v1"; // active session cache
+const LOCAL_USER_PREFIX = "kritx.user.";
+const LOCAL_USERS_INDEX = "kritx.localUsers.v1";
 
 const DEFAULT_PROFILE = () => ({
   version: 1,
@@ -39,28 +42,20 @@ function nowIso() {
 
 const Store = {
   profile: null,
+  activeUser: null,
 
-  load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        this.profile = JSON.parse(raw);
-      } else {
-        this.profile = DEFAULT_PROFILE();
-      }
-    } catch (e) {
-      this.profile = DEFAULT_PROFILE();
-    }
-    // migrate / backfill any missing fields
+  _userKey(username) {
+    return LOCAL_USER_PREFIX + (username || "").toLowerCase();
+  },
+
+  _migrateProfile(profile) {
     const d = DEFAULT_PROFILE();
     for (const k of Object.keys(d)) {
-      if (this.profile[k] === undefined) this.profile[k] = d[k];
+      if (profile[k] === undefined) profile[k] = d[k];
     }
-    // per-task migration (weekdays + daily study logs)
-    for (const t of this.profile.tasks) {
+    for (const t of profile.tasks || []) {
       if (!Array.isArray(t.weekdays)) t.weekdays = [];
       if (!Array.isArray(t.dailyLogs)) {
-        // upgrade old `sessions` into daily study logs
         t.dailyLogs = (t.sessions || []).map((s) => ({
           id: uid(),
           date: s.date,
@@ -77,7 +72,370 @@ const Store = {
       delete t.sources;
       delete t.recurring;
     }
+    return profile;
+  },
+
+  _readLocalJson(username) {
+    if (!username) return null;
+    try {
+      const raw = localStorage.getItem(this._userKey(username));
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  },
+
+  _writeLocalJson(username, profile) {
+    if (!username || !profile) return null;
+    try {
+      localStorage.setItem(this._userKey(username), JSON.stringify(profile));
+      this._rememberLocalUser(username, profile.name, profile);
+      return profile.updatedAt || nowIso();
+    } catch (e) {
+      return null;
+    }
+  },
+
+  _rememberLocalUser(username, name, profile) {
+    const u = (username || "").toLowerCase();
+    if (!u) return;
+    let list = [];
+    try {
+      list = JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
+    } catch (e) {
+      list = [];
+    }
+    if (!Array.isArray(list)) list = [];
+    const entry = {
+      username: u,
+      name: (profile && profile.name) || name || u,
+      tasks: profile ? (profile.tasks || []).length : 0,
+      skills: profile ? (profile.skills || []).length : 0,
+      savedAt: (profile && profile.updatedAt) || nowIso(),
+      local: true,
+    };
+    list = list.filter((x) => x.username !== u);
+    list.unshift(entry);
+    try {
+      localStorage.setItem(LOCAL_USERS_INDEX, JSON.stringify(list));
+    } catch (e) {
+      /* ignore */
+    }
+  },
+
+  listLocalUsers() {
+    const fromIndex = (() => {
+      try {
+        return JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
+      } catch (e) {
+        return [];
+      }
+    })();
+    const found = new Map();
+    for (const u of fromIndex) {
+      if (u && u.username) found.set(u.username, u);
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(LOCAL_USER_PREFIX)) continue;
+      const username = key.slice(LOCAL_USER_PREFIX.length);
+      const info = this.getLocalSaveInfo(username);
+      if (!info) continue;
+      const prev = found.get(username) || {};
+      found.set(username, {
+        username,
+        name: prev.name || username,
+        tasks: info.tasks,
+        skills: info.skills,
+        savedAt: info.savedAt,
+        local: true,
+      });
+    }
+    return Array.from(found.values()).sort((a, b) =>
+      a.username.localeCompare(b.username)
+    );
+  },
+
+  _isEmpty(p) {
+    if (!p || typeof p !== "object") return true;
+    return !(p.tasks || []).length && !(p.skills || []).length;
+  },
+
+  /* Pull older saves into the per-user JSON key (one-time migration). */
+  _legacyCandidates(username) {
+    const out = [];
+    const backupKey = `kritx.autobackup.v1.${(username || "").toLowerCase()}`;
+    try {
+      const backupRaw = localStorage.getItem(backupKey);
+      if (backupRaw) {
+        const backup = JSON.parse(backupRaw);
+        if (backup && backup.profile) out.push(backup.profile);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      const sessionRaw = localStorage.getItem(STORAGE_KEY);
+      if (sessionRaw) out.push(JSON.parse(sessionRaw));
+    } catch (e) {
+      /* ignore */
+    }
+    return out;
+  },
+
+  _profileScore(p) {
+    if (!p || typeof p !== "object") return 0;
+    const tasks = (p.tasks || []).length;
+    const skills = (p.skills || []).length;
+    const updated = p.updatedAt ? new Date(p.updatedAt).getTime() : 0;
+    return tasks * 10000 + skills * 5000 + updated;
+  },
+
+  _pickBestProfile(candidates) {
+    let best = null;
+    let bestScore = -1;
+    for (const p of candidates) {
+      if (!p || typeof p !== "object") continue;
+      const score = this._profileScore(p);
+      if (score > bestScore) {
+        best = p;
+        bestScore = score;
+      }
+    }
+    return best;
+  },
+
+  load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      this.profile = raw ? JSON.parse(raw) : DEFAULT_PROFILE();
+    } catch (e) {
+      this.profile = DEFAULT_PROFILE();
+    }
+    this.profile = this._migrateProfile(this.profile);
     return this.profile;
+  },
+
+  /* Local wins over empty server. Otherwise more data / newer updatedAt wins. */
+  reconcile(username, remoteProfile, displayName) {
+    this.activeUser = (username || "").toLowerCase();
+    let local = this._readLocalJson(this.activeUser);
+    if (!local) {
+      const migrated = this._pickBestProfile(this._legacyCandidates(this.activeUser));
+      local = migrated ? { ...migrated } : null;
+    }
+
+    const remote =
+      remoteProfile && typeof remoteProfile === "object" ? remoteProfile : null;
+    const localEmpty = this._isEmpty(local);
+    const remoteEmpty = this._isEmpty(remote);
+    const localScore = this._profileScore(local);
+    const remoteScore = this._profileScore(remote);
+
+    let winner = null;
+    let source = "new";
+
+    if (!localEmpty && remoteEmpty) {
+      winner = local;
+      source = "local";
+    } else if (localEmpty && !remoteEmpty) {
+      winner = remote;
+      source = "server";
+    } else if (!localEmpty && !remoteEmpty) {
+      if (localScore > remoteScore) {
+        winner = local;
+        source = "local";
+      } else if (remoteScore > localScore) {
+        winner = remote;
+        source = "server";
+      } else {
+        const lt = new Date(local.updatedAt || 0).getTime();
+        const rt = new Date(remote.updatedAt || 0).getTime();
+        winner = lt >= rt ? local : remote;
+        source = lt >= rt ? "local" : "server";
+      }
+    } else if (local) {
+      winner = local;
+      source = "local";
+    } else if (remote) {
+      winner = remote;
+      source = "server";
+    } else {
+      winner = DEFAULT_PROFILE();
+      if (displayName) winner.name = displayName;
+      winner.onboarded = true;
+      winner.updatedAt = nowIso();
+      source = "new";
+    }
+
+    if (displayName && (!winner.name || winner.name === winner.username)) {
+      winner.name = displayName;
+    }
+    if (!winner.updatedAt) winner.updatedAt = nowIso();
+    this.profile = this._migrateProfile({ ...winner });
+    this.profile.onboarded = true;
+    this._writeLocalJson(this.activeUser, this.profile);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+
+    // Upload whenever local is the winner, or mailbox is empty and we have data
+    const pushed = source === "local" || source === "new" || (remoteEmpty && !localEmpty);
+
+    return {
+      source,
+      pushed,
+      pulled: source === "server",
+      localScore,
+      remoteScore,
+    };
+  },
+
+  loadForUser(username, displayName) {
+    this.activeUser = (username || "").toLowerCase();
+    let profile = this._readLocalJson(this.activeUser);
+
+    if (!profile) {
+      const migrated = this._pickBestProfile(this._legacyCandidates(this.activeUser));
+      profile = migrated ? { ...migrated } : DEFAULT_PROFILE();
+      if (displayName && !profile.name) profile.name = displayName;
+      profile.onboarded = true;
+      profile.updatedAt = nowIso();
+      this._writeLocalJson(this.activeUser, profile);
+    }
+
+    this.profile = this._migrateProfile(profile);
+    this.profile.onboarded = true;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    return this.profile;
+  },
+
+  getLocalSaveInfo(username) {
+    const p = this._readLocalJson(username);
+    if (!p) return null;
+    return {
+      savedAt: p.updatedAt || null,
+      tasks: (p.tasks || []).length,
+      skills: (p.skills || []).length,
+    };
+  },
+
+  clearUserData(username) {
+    if (!username) return;
+    const u = username.toLowerCase();
+    localStorage.removeItem(this._userKey(u));
+    localStorage.removeItem(`kritx.autobackup.v1.${u}`);
+    try {
+      const list = JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
+      localStorage.setItem(
+        LOCAL_USERS_INDEX,
+        JSON.stringify((list || []).filter((x) => x.username !== u))
+      );
+    } catch (e) {
+      /* ignore */
+    }
+  },
+
+  /* Profile JSON already on this device for this username (for register upload). */
+  peekLocalProfile(username) {
+    const u = (username || "").toLowerCase();
+    let p = this._readLocalJson(u);
+    if (!p) p = this._pickBestProfile(this._legacyCandidates(u));
+    return p && typeof p === "object" ? this._migrateProfile({ ...p }) : null;
+  },
+
+  save() {
+    this.profile.updatedAt = nowIso();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    if (this.activeUser) {
+      this._writeLocalJson(this.activeUser, this.profile);
+    } else if (typeof Sync !== "undefined" && Sync.username()) {
+      this.activeUser = Sync.username().toLowerCase();
+      this._writeLocalJson(this.activeUser, this.profile);
+    }
+    this._scheduleCloudSync();
+    this._scheduleLocalSnapshot();
+  },
+
+  _cloudTimer: null,
+  _scheduleCloudSync() {
+    if (typeof Sync === "undefined" || !Sync.token()) return;
+    clearTimeout(this._cloudTimer);
+    this._cloudTimer = setTimeout(() => {
+      Sync.pushProfile(this.profile).catch(() => {});
+    }, 800);
+  },
+
+  _snapshotTimer: null,
+  _scheduleLocalSnapshot() {
+    clearTimeout(this._snapshotTimer);
+    this._snapshotTimer = setTimeout(() => {
+      if (!this.profile) return;
+      const u =
+        this.activeUser ||
+        (typeof Sync !== "undefined" && Sync.username()
+          ? Sync.username().toLowerCase()
+          : null);
+      if (!u) return;
+      this._writeLocalJson(u, this.profile);
+      if (typeof Sync !== "undefined" && Sync.token()) {
+        Sync.pushProfile(this.profile).catch(() => {});
+      }
+    }, 5 * 60 * 1000);
+  },
+
+  async pushToCloud() {
+    const u =
+      this.activeUser ||
+      (typeof Sync !== "undefined" && Sync.username()
+        ? Sync.username().toLowerCase()
+        : null);
+    if (u) this._writeLocalJson(u, this.profile);
+    if (typeof Sync !== "undefined" && Sync.token()) {
+      return Sync.pushProfile(this.profile);
+    }
+    return this.profile;
+  },
+
+  async pullFromCloud() {
+    const u =
+      typeof Sync !== "undefined" && Sync.username()
+        ? Sync.username().toLowerCase()
+        : this.activeUser;
+    if (!u) return { profile: this.profile, sync: null };
+    try {
+      const remote = await Sync.pullProfile();
+      const result = this.reconcile(u, remote);
+      if (result.pushed) await Sync.pushProfile(this.profile);
+      return { profile: this.profile, sync: result };
+    } catch (e) {
+      return { profile: this.loadForUser(u), sync: null };
+    }
+  },
+
+  applyRemoteProfile(remote) {
+    if (!remote || typeof remote !== "object") return;
+    this.profile = this._migrateProfile({ ...remote });
+    this.profile.onboarded = true;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    if (this.activeUser) this._writeLocalJson(this.activeUser, this.profile);
+  },
+
+  async syncAfterAuth(username, displayName, remoteProfile) {
+    const result = this.reconcile(username, remoteProfile, displayName);
+    if (result.pushed) {
+      try {
+        await Sync.pushProfile(this.profile);
+      } catch (e) {
+        /* server waking */
+      }
+    }
+    return result;
+  },
+
+  clearLocal() {
+    // Clears session cache only — keeps kritx.user.<name> local JSON
+    this.profile = DEFAULT_PROFILE();
+    this.activeUser = null;
+    localStorage.removeItem(STORAGE_KEY);
   },
 
   _sumHours(task) {
@@ -103,70 +461,6 @@ const Store = {
     const y = yd.toISOString().slice(0, 10);
     task.streak.count = task.streak.lastDate === y ? task.streak.count + 1 : 1;
     task.streak.lastDate = today;
-  },
-
-  save() {
-    this.profile.updatedAt = new Date().toISOString();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-    this._scheduleSync();
-  },
-
-  _syncTimer: null,
-  _scheduleSync() {
-    if (typeof Sync === "undefined" || !Sync.token()) return;
-    clearTimeout(this._syncTimer);
-    this._syncTimer = setTimeout(() => {
-      this.pushToCloud().catch(() => {});
-    }, 800);
-  },
-
-  async pushToCloud() {
-    if (typeof Sync === "undefined" || !Sync.token()) return null;
-    return Sync.pushProfile(this.profile);
-  },
-
-  async pullFromCloud() {
-    if (typeof Sync === "undefined" || !Sync.token()) return null;
-    const remote = await Sync.pullProfile();
-    if (remote && typeof remote === "object") {
-      this.profile = remote;
-      // re-run migrations without wiping
-      const d = DEFAULT_PROFILE();
-      for (const k of Object.keys(d)) {
-        if (this.profile[k] === undefined) this.profile[k] = d[k];
-      }
-      for (const t of this.profile.tasks || []) {
-        if (!Array.isArray(t.weekdays)) t.weekdays = [];
-        if (!Array.isArray(t.dailyLogs)) t.dailyLogs = [];
-        if (!t.streak) t.streak = { count: 0, lastDate: null };
-        t.loggedHours = this._sumHours(t);
-      }
-      this.profile.onboarded = true;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-    }
-    return this.profile;
-  },
-
-  applyRemoteProfile(remote) {
-    if (!remote || typeof remote !== "object") return;
-    this.profile = remote;
-    const d = DEFAULT_PROFILE();
-    for (const k of Object.keys(d)) {
-      if (this.profile[k] === undefined) this.profile[k] = d[k];
-    }
-    for (const t of this.profile.tasks || []) {
-      if (!Array.isArray(t.weekdays)) t.weekdays = [];
-      if (!Array.isArray(t.dailyLogs)) t.dailyLogs = [];
-      if (!t.streak) t.streak = { count: 0, lastDate: null };
-      t.loggedHours = this._sumHours(t);
-    }
-    this.profile.onboarded = true;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-  },
-
-  clearLocal() {
-    this.profile = DEFAULT_PROFILE();
-    localStorage.removeItem(STORAGE_KEY);
   },
 
   // ---------- profile ----------
@@ -539,15 +833,25 @@ const Store = {
     if (!data || typeof data !== "object" || !Array.isArray(data.tasks)) {
       throw new Error("That doesn't look like a Codex backup file.");
     }
-    // Persist first, then load() so migration/backfill runs on the imported data.
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     this.load();
     this.save();
   },
 
   wipe() {
+    const username =
+      this.activeUser ||
+      (typeof Sync !== "undefined" && Sync.username()
+        ? Sync.username().toLowerCase()
+        : null);
     this.profile = DEFAULT_PROFILE();
-    this.save();
+    this.profile.onboarded = true;
+    this.profile.updatedAt = nowIso();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    if (username) {
+      this.activeUser = username;
+      this._writeLocalJson(username, this.profile);
+    }
   },
 
   // ---------- derived stats ----------
