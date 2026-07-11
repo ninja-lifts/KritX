@@ -51,9 +51,20 @@ Wait ~3–5 minutes. Render gives you a URL like:
 1. Open that URL in Chrome (phone, laptop, tablet).
 2. **Create account** — username + private password.
 3. **Bookmark the link** on each device.
-4. On another device: open same URL → tap your username → password → **same tasks & Codex**.
+4. On another device: open same URL → tap your username → password.
+5. **Profile → Link PC data folder** (or put that folder in OneDrive and link the same place on each PC).
 
-Profile page shows: **Signed in as @yourusername — synced**.
+---
+
+## Where your Codex lives
+
+| Place | Role |
+|------|------|
+| PC: `kritx-data/<username>/profile.json` | Your live folder (paths may differ per PC) |
+| Server: `data/users/<username>/profile.json` | Sync bridge so both PCs get the latest |
+| Browser | Does **not** store Codex |
+
+After login on each PC: link any folder → same **username** subfolder is created. Fetch/update/export use that folder.
 
 ---
 

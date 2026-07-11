@@ -347,7 +347,6 @@ const Sync = {
       auth: false,
       body: { username, password },
     });
-    // Never unforget here — deleted accounts stay deleted until Create account
     this.setAuth({
       token: data.token,
       username: data.username,
@@ -356,6 +355,17 @@ const Sync = {
     this.rememberUser(data.username, data.name);
     await this.announceDirectory();
     return { ...data, reclaimed: false };
+  },
+
+  async getProfile() {
+    return this.request("/api/profile", { method: "GET" });
+  },
+
+  async putProfile(profile) {
+    return this.request("/api/profile", {
+      method: "PUT",
+      body: { profile },
+    });
   },
 
   /**

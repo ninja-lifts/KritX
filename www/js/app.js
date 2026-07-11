@@ -83,14 +83,75 @@ function fmtDate(iso) {
 
 function syncToast(result) {
   if (!result) return;
-  const peers = result.peers || 1;
-  if (result.pulled) {
-    toast(`Codex updated from another online PC (${peers} online)`);
-  } else if (peers > 1 && result.youAreWinner) {
-    toast(`This PC’s Codex is newest — shared with ${peers - 1} other PC${peers - 1 === 1 ? "" : "s"}`);
-  } else if (peers <= 1) {
-    toast("Saved locally · open another PC with the same login to share Codex");
+  if (result.needsFolder) {
+    toast("Link your PC data folder to load and save Codex");
+    return;
   }
+  if (result.pulled) toast("Fetched latest into your username folder");
+  else if (result.pushed) toast("Updated your username folder + synced");
+  else toast("Username folder in sync");
+}
+
+async function requireDataFolder() {
+  if (typeof LocalFolder === "undefined" || !LocalFolder.supported()) {
+    const root = $("#modalRoot");
+    const back = document.createElement("div");
+    back.className = "modal-backdrop show";
+    back.innerHTML = `<div class="modal">
+      <h2 class="modal-title">Chrome or Edge required</h2>
+      <p class="modal-sub">kritX stores all tasks and Codex only in a folder on your PC. Open this site in Chrome or Edge, then link a folder.</p>
+    </div>`;
+    root.appendChild(back);
+    return false;
+  }
+
+  try {
+    await LocalFolder.restore();
+  } catch (e) {
+    /* ignore */
+  }
+  if (Store.folderLinked()) {
+    await Store.ensureFolderReady(
+      Sync.username(),
+      Sync.getAuth() && Sync.getAuth().name
+    );
+    return true;
+  }
+
+  return new Promise((resolve) => {
+    const root = $("#modalRoot");
+    const back = document.createElement("div");
+    back.className = "modal-backdrop show";
+    back.innerHTML = `<div class="modal">
+      <h2 class="modal-title">Link your PC data folder</h2>
+      <p class="modal-sub">
+        Paths can differ on each PC. What must match is the <b>username folder</b>:
+        <b>kritx-data/&lt;username&gt;/profile.json</b>.
+        Choose any parent folder (Documents, Desktop, OneDrive…). kritX creates that username folder,
+        keeps it updated, and syncs latest data across your PCs for the same login.
+        Export also comes from this folder.
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="folderGateLink">Choose folder</button>
+      </div>
+    </div>`;
+    root.appendChild(back);
+    $("#folderGateLink").onclick = async () => {
+      try {
+        await LocalFolder.pickAndLink();
+        await Store.ensureFolderReady(
+          Sync.username(),
+          Sync.getAuth() && Sync.getAuth().name
+        );
+        back.remove();
+        toast("PC folder linked — Codex loads and saves there only");
+        resolve(true);
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        toast(e.message || "Could not link folder");
+      }
+    };
+  });
 }
 
 function relTime(iso) {
@@ -1608,36 +1669,45 @@ function renderProfile() {
     </div>
     <button class="btn btn-ghost btn-block" id="saveAdz">Save market keys</button>
 
-    <div class="section-head"><p class="section-label">Account & backup</p></div>
+    <div class="section-head"><p class="section-label">PC data folder (required)</p></div>
     <div class="settings-card">
-      <button class="settings-row" id="syncNowBtn">
-        <span class="sr-ico">☁</span>
-        <span class="sr-body"><span class="sr-title">Sync with online PCs</span><span class="sr-sub">Share usernames + Codex live (richest copy wins)</span></span>
+      <button class="settings-row" id="linkFolderBtn">
+        <span class="sr-ico">📁</span>
+        <span class="sr-body"><span class="sr-title" id="linkFolderTitle">Link PC data folder</span><span class="sr-sub" id="linkFolderSub">Required — all Codex lives in kritx-data on your disk</span></span>
+        <span class="sr-arrow">›</span>
+      </button>
+      <button class="settings-row" id="syncFolderBtn" hidden>
+        <span class="sr-ico">↺</span>
+        <span class="sr-body"><span class="sr-title">Fetch / update from folder</span><span class="sr-sub">Reload latest from disk and write any new changes</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="exportBtn">
         <span class="sr-ico">⬇</span>
-        <span class="sr-body"><span class="sr-title">Export backup</span><span class="sr-sub">Save a .json file copy</span></span>
+        <span class="sr-body"><span class="sr-title">Export backup</span><span class="sr-sub">Download a .json copy of the folder data</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="importBtn">
         <span class="sr-ico">⬆</span>
-        <span class="sr-body"><span class="sr-title">Import backup</span><span class="sr-sub">Load a .json file into this account</span></span>
+        <span class="sr-body"><span class="sr-title">Import into folder</span><span class="sr-sub">Load a .json file and write it into your PC folder</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <input type="file" id="importFile" accept="application/json" hidden>
       <button class="settings-row" id="logoutBtn">
         <span class="sr-ico">↩</span>
-        <span class="sr-body"><span class="sr-title">Log out</span><span class="sr-sub">Sign out on this device only</span></span>
+        <span class="sr-body"><span class="sr-title">Log out</span><span class="sr-sub">Sign out — folder files stay on disk</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row danger" id="wipeBtn">
         <span class="sr-ico">🗑</span>
-        <span class="sr-body"><span class="sr-title">Delete account</span><span class="sr-sub">Remove login + erase Codex on this device (won't auto-restore)</span></span>
+        <span class="sr-body"><span class="sr-title">Delete account</span><span class="sr-sub">Remove login (folder files stay until you delete them)</span></span>
         <span class="sr-arrow">›</span>
       </button>
     </div>
-    <p class="muted small" style="margin-top:10px">Usernames and Codex move the same way: while PCs are open, the newest/most complete copy is shared live in memory. Server never keeps your Codex on disk.</p>
+    <p class="muted small" style="margin-top:10px" id="folderHelp">
+      On every PC: link any folder → kritX creates <b>kritx-data/&lt;username&gt;/</b> (paths may differ).
+      Fetch/update keeps that username folder live and syncs latest across PCs for the same login.
+      Export/import uses this folder. Browser does not store Codex.
+    </p>
     <p class="app-footer">kritX · your personal learning OS</p>
   `;
 
@@ -1645,9 +1715,65 @@ function renderProfile() {
   if (hl)
     hl.addEventListener("click", () => (location.hash = "#/skill/" + hl.dataset.viewSkill));
 
+  function refreshFolderUi() {
+    const st =
+      typeof LocalFolder !== "undefined"
+        ? LocalFolder.status()
+        : { supported: false, linked: false };
+    const title = $("#linkFolderTitle");
+    const sub = $("#linkFolderSub");
+    const syncF = $("#syncFolderBtn");
+    if (!st.supported) {
+      if (title) title.textContent = "PC folder not supported here";
+      if (sub) sub.textContent = "Open kritX in Chrome or Edge to link a folder.";
+      if (syncF) syncF.hidden = true;
+      return;
+    }
+    if (st.linked) {
+      if (title) title.textContent = "PC data folder linked";
+      if (sub)
+        sub.textContent =
+          (st.label || "Linked") + " · " + LocalFolder.pathHint(Sync.username());
+      if (syncF) syncF.hidden = false;
+    } else {
+      if (title) title.textContent = "Link PC data folder (required)";
+      if (sub)
+        sub.textContent = "Choose a folder — all saves go to kritx-data (not the browser)";
+      if (syncF) syncF.hidden = true;
+    }
+  }
+  refreshFolderUi();
+
+  $("#linkFolderBtn").addEventListener("click", async () => {
+    try {
+      await LocalFolder.pickAndLink();
+      await Store.ensureFolderReady(
+        Sync.username(),
+        Sync.getAuth() && Sync.getAuth().name
+      );
+      toast("Folder linked — browser Codex cache cleared");
+      refreshFolderUi();
+      router();
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      toast(e.message || "Could not link folder");
+    }
+  });
+  $("#syncFolderBtn").addEventListener("click", async () => {
+    try {
+      const r = await Store.syncWithLocalFolder();
+      if (r.pulled) toast("Fetched latest from PC folder");
+      else if (r.pushed) toast("Updated PC folder with new changes");
+      else toast("Folder already up to date");
+      router();
+    } catch (e) {
+      toast(e.message || "Folder sync failed");
+    }
+  });
+
   $("#saveName").addEventListener("click", () => {
     Store.setName($("#editName").value);
-    toast("Saved");
+    toast("Saved to PC folder");
     setTopbar("profile");
   });
   $("#saveAdz").addEventListener("click", () => {
@@ -1658,32 +1784,21 @@ function renderProfile() {
     Live.save();
     toast("Market keys saved");
   });
-  $("#syncNowBtn").addEventListener("click", async () => {
-    try {
-      const { sync } = await Store.syncWithPeers();
-      if (sync) syncToast(sync);
-      else toast("Could not reach peer sync");
-      renderProfile();
-    } catch (e) {
-      toast(e.message || "Sync failed");
-    }
-  });
   $("#exportBtn").addEventListener("click", exportBackup);
   $("#importBtn").addEventListener("click", () => $("#importFile").click());
   $("#importFile").addEventListener("change", async (e) => {
-    await importBackup(e);
     try {
-      await Store.syncWithPeers();
-      toast("Imported & shared with online PCs ✓");
+      await importBackup(e);
+      toast("Imported into PC folder ✓");
+      router();
     } catch (err) {
-      toast("Imported locally ✓");
+      /* toast already shown */
     }
-    router();
   });
   $("#logoutBtn").addEventListener("click", () =>
     openConfirm(
       "Log out?",
-      "You'll need your password again. Your local tasks & Codex stay on this device.",
+      "You'll need your password again. Your PC folder files stay on disk.",
       async () => {
       await Sync.logout();
       Store.clearLocal();
@@ -1696,13 +1811,13 @@ function renderProfile() {
       "Delete this account?",
       "Removes @" +
         (Sync.username() || "you") +
-        " from the server and deletes Codex on this device. It will NOT auto-restore on login. Other PCs will drop it when they sync. To use the name again later, Create account manually.",
+        " from the server login list. Folder files on disk are left for you to delete manually.",
       async () => {
         const username = Sync.username();
         try {
           await Sync.deleteAccount();
         } catch (e) {
-          toast(e.message || "Server delete failed — clearing local data");
+          toast(e.message || "Server delete failed — clearing session");
           Sync.setAuth(null);
           if (username) Sync.forgetUser(username);
           Sync.broadcastAuthEvent("deleted", username);
@@ -2436,8 +2551,13 @@ function download(filename, text, type = "application/json") {
 
 function exportBackup() {
   const stamp = new Date().toISOString().slice(0, 10);
-  download(`kritx-backup-${stamp}.json`, Store.exportJson());
-  toast("Backup downloaded");
+  const user = (Sync.username() || "backup").toLowerCase();
+  download(`kritx-${user}-${stamp}.json`, Store.exportJson());
+  Store.writeToLinkedFolder()
+    .then((ok) => {
+      toast(ok ? "Backup downloaded + saved to PC folder" : "Backup downloaded");
+    })
+    .catch(() => toast("Backup downloaded"));
 }
 
 function importBackup(e) {
@@ -2524,8 +2644,8 @@ function setAuthMode(mode) {
   $("#authRegister").hidden = login;
   $("#authTitle").textContent = login ? "Welcome back" : "Create your account";
   $("#authSub").textContent = login
-    ? "Data stays on each PC. While PCs are open, the newest copy is shared live — server never saves it."
-    : "Create a username + password for login only. Your Codex is local; online peers sync live.";
+    ? "After login you must link a PC folder. Codex is never stored in the browser or on the server."
+    : "Create login, then link a PC folder — that folder is the only place tasks/Codex are saved.";
   showAuthError("");
 }
 
@@ -2683,19 +2803,16 @@ function showLoginScreen() {
         password,
         name: username,
       });
+      if (data.reclaimed) {
+        toast("Host had wiped login — restored @" + data.username + " automatically");
+      } else {
+        toast("Welcome back, " + (data.name || data.username));
+      }
       const sync = await Store.syncAfterAuth(
         data.username,
         data.name || data.username
       );
-      if (data.reclaimed) {
-        toast("Host had wiped login — restored @" + data.username + " automatically");
-      } else {
-        syncToast(sync);
-        if (!sync || (!sync.pulled && !(sync.peers > 1))) {
-          toast("Welcome back, " + (data.name || data.username));
-        }
-      }
-      startApp();
+      await enterAppAfterAuth(sync);
     } catch (e) {
       showAuthError(e.message || "Login failed.");
       refreshUserList();
@@ -2725,15 +2842,9 @@ function showLoginScreen() {
     $("#registerBtn").disabled = true;
     try {
       const data = await Sync.register({ username, password, name });
+      toast("Account created · you're signed in");
       const sync = await Store.syncAfterAuth(data.username, name);
-      const existing = Store.peekLocalProfile(username);
-      if (existing && !Store._isEmpty(existing)) {
-        toast("Account ready · local Codex loaded");
-      } else {
-        toast("Account created · you're signed in");
-      }
-      syncToast(sync);
-      startApp();
+      await enterAppAfterAuth(sync);
     } catch (e) {
       showAuthError(e.message || "Could not create account.");
     } finally {
@@ -2766,12 +2877,22 @@ function startApp() {
     if (r.startsWith("market") || r.startsWith("field")) router();
   });
 
-  // Live transfer: usernames + Codex together every 8s (same heartbeat)
-  if (Sync.token()) {
-    setInterval(() => {
-      Store.syncWithPeers().catch(() => {});
-    }, 8000);
+  // Periodically fetch/update from the linked PC folder
+  setInterval(() => {
+    if (!Store.folderLinked()) return;
+    Store.syncWithLocalFolder().catch(() => {});
+  }, 12000);
+}
+
+async function enterAppAfterAuth(syncResult) {
+  const ok = await requireDataFolder();
+  if (!ok) {
+    showLoginScreen();
+    showAuthError("Link a PC data folder in Chrome/Edge to use kritX.");
+    return;
   }
+  startApp();
+  syncToast(syncResult && !syncResult.needsFolder ? syncResult : { pulled: true });
 }
 
 async function boot() {
@@ -2801,8 +2922,7 @@ async function boot() {
       await Sync.request("/api/me");
       const username = Sync.username();
       const sync = await Store.syncAfterAuth(username);
-      startApp();
-      syncToast(sync);
+      await enterAppAfterAuth(sync);
       return;
     } catch (e) {
       Sync.setAuth(null);

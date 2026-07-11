@@ -1,13 +1,10 @@
 /**
  * kritX server
  *
- * Serves the website + auth. Learning data is NEVER saved to disk.
- * Online PCs for the same username share via an in-memory presence room:
- * whichever peer has the richest/newest profile wins and is echoed to
- * all other PCs that are currently online. When everyone disconnects,
- * that RAM copy is gone.
- *
- * Disk only stores: password hashes (meta.json) + login sessions.
+ * Serves the website + auth + per-user profile.json (sync bridge between PCs).
+ * Each PC also keeps the same data in a linked folder:
+ *   kritx-data/<username>/profile.json
+ * Absolute paths can differ; the username folder name is what matches.
  *
  * Run:  npm start
  * Open: http://localhost:5050
@@ -77,26 +74,28 @@ function userDir(username) {
 function metaPath(username) {
   return path.join(userDir(username), "meta.json");
 }
-
-/** Delete leftover profile.json from older versions (learning data must not live on disk). */
-function scrubSavedProfiles() {
-  try {
-    if (!fs.existsSync(USERS_DIR)) return;
-    for (const name of fs.readdirSync(USERS_DIR)) {
-      const p = path.join(USERS_DIR, name, "profile.json");
-      if (fs.existsSync(p)) {
-        try {
-          fs.unlinkSync(p);
-        } catch (e) {
-          /* ignore */
-        }
-      }
-    }
-  } catch (e) {
-    /* ignore */
-  }
+function profilePath(username) {
+  return path.join(userDir(username), "profile.json");
 }
-scrubSavedProfiles();
+
+function readUserProfile(username) {
+  return readJson(profilePath(username), null);
+}
+
+function writeUserProfile(username, profile) {
+  fs.mkdirSync(userDir(username), { recursive: true });
+  writeJson(profilePath(username), profile);
+}
+
+function profileScore(p) {
+  if (!p || typeof p !== "object") return 0;
+  let score = (p.tasks || []).length * 10 + (p.skills || []).length * 20;
+  for (const t of p.tasks || []) {
+    score += (t.dailyLogs || []).length * 2;
+    for (const l of t.dailyLogs || []) score += Math.min(5, (l.minutes || 0) / 30);
+  }
+  return score;
+}
 
 function hashPassword(password, salt) {
   const s = salt || crypto.randomBytes(16).toString("hex");
@@ -443,7 +442,7 @@ async function handleApi(req, res, pathname) {
       service: "kritX",
       users: listUsers().length,
       onlinePeers: online,
-      storesLearningData: false,
+      storesLearningData: true,
     });
     return;
   }
@@ -560,14 +559,13 @@ async function handleApi(req, res, pathname) {
       salt,
       createdAt: new Date().toISOString(),
     });
-    // Never save learning data — client keeps local JSON
     const token = createSession(username);
     send(res, 200, {
       ok: true,
       token,
       username,
       name: name || username,
-      profile: null,
+      profile: readUserProfile(username),
     });
     return;
   }
@@ -591,7 +589,7 @@ async function handleApi(req, res, pathname) {
       token,
       username,
       name: meta.name || username,
-      profile: null,
+      profile: readUserProfile(username),
     });
     return;
   }
@@ -682,11 +680,71 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
-  // Old mailbox endpoints — disabled (no disk learning data)
-  if (pathname === "/api/profile") {
-    send(res, 410, {
-      error: "Server does not store learning data. Use live peer sync (/api/presence).",
-      storesLearningData: false,
+  // Per-user Codex sync bridge (same username on every PC; paths may differ)
+  if (pathname === "/api/profile" && req.method === "GET") {
+    const sess = sessionUser(req);
+    if (!sess) {
+      send(res, 401, { error: "Sign in first." });
+      return;
+    }
+    const profile = readUserProfile(sess.username);
+    send(res, 200, {
+      ok: true,
+      username: sess.username,
+      profile,
+      storesLearningData: true,
+      note: "Sync bridge for kritx-data/<username>/profile.json on each PC.",
+    });
+    return;
+  }
+
+  if (pathname === "/api/profile" && req.method === "PUT") {
+    const sess = sessionUser(req);
+    if (!sess) {
+      send(res, 401, { error: "Sign in first." });
+      return;
+    }
+    const body = await readBody(req);
+    const incoming = body.profile;
+    if (!incoming || typeof incoming !== "object") {
+      send(res, 400, { error: "Missing profile." });
+      return;
+    }
+    const existing = readUserProfile(sess.username);
+    const inScore = profileScore(incoming);
+    const exScore = profileScore(existing);
+    const inTime = incoming.updatedAt ? new Date(incoming.updatedAt).getTime() : 0;
+    const exTime = existing && existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+
+    const emptyIn =
+      !(incoming.tasks || []).length && !(incoming.skills || []).length;
+    const emptyEx =
+      !existing ||
+      (!(existing.tasks || []).length && !(existing.skills || []).length);
+
+    let winner = incoming;
+    let saved = true;
+    if (!emptyEx && emptyIn) {
+      winner = existing;
+      saved = false;
+    } else if (
+      existing &&
+      (exScore > inScore || (exScore === inScore && exTime > inTime))
+    ) {
+      winner = existing;
+      saved = false;
+    } else {
+      if (!incoming.updatedAt) incoming.updatedAt = new Date().toISOString();
+      writeUserProfile(sess.username, incoming);
+      winner = incoming;
+    }
+
+    send(res, 200, {
+      ok: true,
+      saved,
+      profile: winner,
+      score: profileScore(winner),
+      storesLearningData: true,
     });
     return;
   }
@@ -737,6 +795,6 @@ setInterval(() => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n  kritX running → http://localhost:${PORT}`);
-  console.log(`  Learning data → NEVER saved on server (live peer sync only)`);
-  console.log(`  Auth only    → ${USERS_DIR}\n`);
+  console.log(`  User folders  → ${USERS_DIR}/<username>/profile.json (sync bridge)`);
+  console.log(`  PC folders    → kritx-data/<username>/ (linked per browser)\n`);
 });

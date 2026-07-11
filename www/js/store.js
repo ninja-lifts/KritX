@@ -1,12 +1,11 @@
 /*
- * Store — LOCAL-FIRST learning data + live peer transfer (same path as usernames).
- *
- * Each device keeps:  kritx.user.<username>  →  Codex JSON (source of truth)
- * Online PCs share via /api/heartbeat (RAM only): richest Codex wins for that user.
- * Server never writes learning data to disk.
+ * Store — Codex lives in linked PC folder kritx-data/<username>/profile.json
+ * Absolute paths may differ per PC; the username folder name is what matches.
+ * Sync bridge: server data/users/<username>/profile.json keeps both PCs updated.
+ * Browser does not store Codex.
  */
 
-const STORAGE_KEY = "codex.profile.v1"; // active session cache
+const STORAGE_KEY = "codex.profile.v1"; // legacy — cleared, not written
 const LOCAL_USER_PREFIX = "kritx.user.";
 const LOCAL_USERS_INDEX = "kritx.localUsers.v1";
 
@@ -74,6 +73,7 @@ const Store = {
   },
 
   _readLocalJson(username) {
+    // Legacy read only — used once during migrate-to-folder, then keys are wiped
     if (!username) return null;
     try {
       const raw = localStorage.getItem(this._userKey(username));
@@ -83,75 +83,43 @@ const Store = {
     }
   },
 
-  _writeLocalJson(username, profile) {
-    if (!username || !profile) return null;
-    try {
-      localStorage.setItem(this._userKey(username), JSON.stringify(profile));
-      this._rememberLocalUser(username, profile.name, profile);
-      return profile.updatedAt || nowIso();
-    } catch (e) {
-      return null;
-    }
+  _writeLocalJson(_username, _profile) {
+    // No-op: Codex is not stored in the browser anymore
+    return null;
   },
 
-  _rememberLocalUser(username, name, profile) {
-    const u = (username || "").toLowerCase();
-    if (!u) return;
-    let list = [];
+  /** Wipe all browser-cached Codex so the PC folder is the only copy. */
+  purgeBrowserCodex() {
     try {
-      list = JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
-    } catch (e) {
-      list = [];
-    }
-    if (!Array.isArray(list)) list = [];
-    const entry = {
-      username: u,
-      name: (profile && profile.name) || name || u,
-      tasks: profile ? (profile.tasks || []).length : 0,
-      skills: profile ? (profile.skills || []).length : 0,
-      savedAt: (profile && profile.updatedAt) || nowIso(),
-      local: true,
-    };
-    list = list.filter((x) => x.username !== u);
-    list.unshift(entry);
-    try {
-      localStorage.setItem(LOCAL_USERS_INDEX, JSON.stringify(list));
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LOCAL_USERS_INDEX);
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (
+          k &&
+          (k.startsWith(LOCAL_USER_PREFIX) || k.startsWith("kritx.autobackup.v1."))
+        ) {
+          keys.push(k);
+        }
+      }
+      for (const k of keys) localStorage.removeItem(k);
     } catch (e) {
       /* ignore */
     }
   },
 
+  folderLinked() {
+    return typeof LocalFolder !== "undefined" && LocalFolder.status().linked;
+  },
+
+  _rememberLocalUser(username, name, profile) {
+    // Username hints for login list still come from Sync.knownUsers / server — not Codex storage
+  },
+
   listLocalUsers() {
-    const fromIndex = (() => {
-      try {
-        return JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
-      } catch (e) {
-        return [];
-      }
-    })();
-    const found = new Map();
-    for (const u of fromIndex) {
-      if (u && u.username) found.set(u.username, u);
-    }
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(LOCAL_USER_PREFIX)) continue;
-      const username = key.slice(LOCAL_USER_PREFIX.length);
-      const info = this.getLocalSaveInfo(username);
-      if (!info) continue;
-      const prev = found.get(username) || {};
-      found.set(username, {
-        username,
-        name: prev.name || username,
-        tasks: info.tasks,
-        skills: info.skills,
-        savedAt: info.savedAt,
-        local: true,
-      });
-    }
-    return Array.from(found.values()).sort((a, b) =>
-      a.username.localeCompare(b.username)
-    );
+    // Codex is folder-only — login list does not invent users from browser storage
+    return [];
   },
 
   _isEmpty(p) {
@@ -204,230 +172,258 @@ const Store = {
   },
 
   load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      this.profile = raw ? JSON.parse(raw) : DEFAULT_PROFILE();
-    } catch (e) {
-      this.profile = DEFAULT_PROFILE();
-    }
+    // No browser Codex — empty memory until folder is linked and loaded
+    if (!this.profile) this.profile = DEFAULT_PROFILE();
     this.profile = this._migrateProfile(this.profile);
+    this.purgeBrowserCodex();
     return this.profile;
   },
 
-  /* Local wins over empty server. Otherwise more data / newer updatedAt wins. */
-  reconcile(username, remoteProfile, displayName) {
-    this.activeUser = (username || "").toLowerCase();
-    let local = this._readLocalJson(this.activeUser);
-    if (!local) {
-      const migrated = this._pickBestProfile(this._legacyCandidates(this.activeUser));
-      local = migrated ? { ...migrated } : null;
-    }
-
-    const remote =
-      remoteProfile && typeof remoteProfile === "object" ? remoteProfile : null;
-    const localEmpty = this._isEmpty(local);
-    const remoteEmpty = this._isEmpty(remote);
-    const localScore = this._profileScore(local);
-    const remoteScore = this._profileScore(remote);
-
-    let winner = null;
-    let source = "new";
-
-    if (!localEmpty && remoteEmpty) {
-      winner = local;
-      source = "local";
-    } else if (localEmpty && !remoteEmpty) {
-      winner = remote;
-      source = "server";
-    } else if (!localEmpty && !remoteEmpty) {
-      if (localScore > remoteScore) {
-        winner = local;
-        source = "local";
-      } else if (remoteScore > localScore) {
-        winner = remote;
-        source = "server";
-      } else {
-        const lt = new Date(local.updatedAt || 0).getTime();
-        const rt = new Date(remote.updatedAt || 0).getTime();
-        winner = lt >= rt ? local : remote;
-        source = lt >= rt ? "local" : "server";
-      }
-    } else if (local) {
-      winner = local;
-      source = "local";
-    } else if (remote) {
-      winner = remote;
-      source = "server";
-    } else {
-      winner = DEFAULT_PROFILE();
-      if (displayName) winner.name = displayName;
-      winner.onboarded = true;
-      winner.updatedAt = nowIso();
-      source = "new";
-    }
-
-    if (displayName && (!winner.name || winner.name === winner.username)) {
-      winner.name = displayName;
-    }
-    if (!winner.updatedAt) winner.updatedAt = nowIso();
-    this.profile = this._migrateProfile({ ...winner });
-    this.profile.onboarded = true;
-    this._writeLocalJson(this.activeUser, this.profile);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-
-    // Upload whenever local is the winner, or mailbox is empty and we have data
-    const pushed = source === "local" || source === "new" || (remoteEmpty && !localEmpty);
-
+  /* Legacy mailbox reconcile — folder-only now; ignore remote server profiles. */
+  reconcile(username, _remoteProfile, displayName) {
+    this.loadForUser(username, displayName);
     return {
-      source,
-      pushed,
-      pulled: source === "server",
-      localScore,
-      remoteScore,
+      source: "folder",
+      pushed: false,
+      pulled: false,
+      localScore: this._profileScore(this.profile),
+      remoteScore: 0,
     };
   },
 
   loadForUser(username, displayName) {
     this.activeUser = (username || "").toLowerCase();
-    let profile = this._readLocalJson(this.activeUser);
-
-    if (!profile) {
-      const migrated = this._pickBestProfile(this._legacyCandidates(this.activeUser));
-      profile = migrated ? { ...migrated } : DEFAULT_PROFILE();
-      if (displayName && !profile.name) profile.name = displayName;
-      profile.onboarded = true;
-      profile.updatedAt = nowIso();
-      this._writeLocalJson(this.activeUser, profile);
-    }
-
-    this.profile = this._migrateProfile(profile);
+    // Memory shell only — real data comes from folder via syncWithLocalFolder / ensureFolderReady
+    this.profile = DEFAULT_PROFILE();
+    if (displayName) this.profile.name = displayName;
     this.profile.onboarded = true;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
+    this.profile.updatedAt = nowIso();
     return this.profile;
   },
 
   getLocalSaveInfo(username) {
-    const p = this._readLocalJson(username);
-    if (!p) return null;
-    return {
-      savedAt: p.updatedAt || null,
-      tasks: (p.tasks || []).length,
-      skills: (p.skills || []).length,
-    };
+    return null;
   },
 
   clearUserData(username) {
+    // Browser Codex keys only (folder files left on disk for the user to delete)
     if (!username) return;
     const u = username.toLowerCase();
-    localStorage.removeItem(this._userKey(u));
-    localStorage.removeItem(`kritx.autobackup.v1.${u}`);
     try {
-      const list = JSON.parse(localStorage.getItem(LOCAL_USERS_INDEX) || "[]");
-      localStorage.setItem(
-        LOCAL_USERS_INDEX,
-        JSON.stringify((list || []).filter((x) => x.username !== u))
-      );
+      localStorage.removeItem(this._userKey(u));
+      localStorage.removeItem(`kritx.autobackup.v1.${u}`);
     } catch (e) {
       /* ignore */
     }
   },
 
-  /* Profile JSON already on this device for this username (for register upload). */
   peekLocalProfile(username) {
-    const u = (username || "").toLowerCase();
-    let p = this._readLocalJson(u);
-    if (!p) p = this._pickBestProfile(this._legacyCandidates(u));
-    return p && typeof p === "object" ? this._migrateProfile({ ...p }) : null;
+    return null;
   },
 
   save() {
+    if (!this.profile) return;
     this.profile.updatedAt = nowIso();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-    if (this.activeUser) {
-      this._writeLocalJson(this.activeUser, this.profile);
-    } else if (typeof Sync !== "undefined" && Sync.username()) {
+    if (!this.activeUser && typeof Sync !== "undefined" && Sync.username()) {
       this.activeUser = Sync.username().toLowerCase();
-      this._writeLocalJson(this.activeUser, this.profile);
     }
-    this._schedulePeerSync();
+    if (!this.folderLinked()) {
+      this._pendingSave = true;
+      if (typeof toast === "function") {
+        toast("Link your PC data folder to save — Profile → Link PC data folder");
+      }
+      return;
+    }
+    this._pendingSave = false;
+    this._scheduleFolderWrite();
   },
 
-  _peerTimer: null,
-  _schedulePeerSync() {
-    if (typeof Sync === "undefined" || !Sync.token()) return;
-    clearTimeout(this._peerTimer);
-    this._peerTimer = setTimeout(() => {
-      this.syncWithPeers().catch(() => {});
-    }, 1000);
+  _folderTimer: null,
+  _pendingSave: false,
+  _scheduleFolderWrite() {
+    if (!this.folderLinked()) return;
+    const u = this.activeUser;
+    if (!u || !this.profile) return;
+    clearTimeout(this._folderTimer);
+    this._folderTimer = setTimeout(() => {
+      LocalFolder.writeProfile(u, this.profile)
+        .then(() => this._pushServerBridge())
+        .catch((e) => {
+          if (typeof toast === "function") {
+            toast(e.message || "Could not write to PC folder");
+          }
+        });
+    }, 300);
   },
 
-  lastPeerSync: null,
+  _bridgeTimer: null,
+  _pushServerBridge() {
+    if (typeof Sync === "undefined" || !Sync.token() || !this.profile) return;
+    if (this._isEmpty(this.profile)) return;
+    clearTimeout(this._bridgeTimer);
+    this._bridgeTimer = setTimeout(() => {
+      Sync.putProfile(this.profile).catch(() => {});
+    }, 500);
+  },
 
-  async syncWithPeers() {
+  async writeToLinkedFolder() {
+    if (!this.folderLinked()) return false;
     const u =
       this.activeUser ||
       (typeof Sync !== "undefined" && Sync.username()
         ? Sync.username().toLowerCase()
         : null);
-    if (!u || typeof Sync === "undefined" || !Sync.token()) {
-      return { profile: this.profile, sync: null };
-    }
-    if (!this.profile) this.loadForUser(u);
-    this._writeLocalJson(u, this.profile);
-
-    try {
-      // Don't broadcast an empty Codex into the live room (avoids wiping peers)
-      const sendProfile = this._isEmpty(this.profile) ? null : this.profile;
-      const data = sendProfile
-        ? await Sync.presence(sendProfile)
-        : await Sync.heartbeat({});
-      const presence = data.presence || data;
-      const peers = presence.peers || data.peers || 1;
-      const winner = presence.winner || data.winner;
-      const before = this._profileScore(this.profile);
-      const after = this._profileScore(winner);
-      const beforeTime = this.profile && this.profile.updatedAt
-        ? new Date(this.profile.updatedAt).getTime()
-        : 0;
-      const afterTime = winner && winner.updatedAt
-        ? new Date(winner.updatedAt).getTime()
-        : 0;
-
-      let sync = {
-        source: "local",
-        pushed: Boolean(sendProfile),
-        pulled: false,
-        peers,
-        youAreWinner: Boolean(presence.youAreWinner || data.youAreWinner),
-      };
-
-      const peerWins =
-        winner &&
-        !this._isEmpty(winner) &&
-        (after > before ||
-          (after === before && afterTime > beforeTime) ||
-          this._isEmpty(this.profile));
-
-      if (peerWins) {
-        this.applyRemoteProfile(winner);
-        this._writeLocalJson(u, this.profile);
-        sync = {
-          source: "peer",
-          pushed: false,
-          pulled: true,
-          peers,
-          youAreWinner: false,
-        };
-      }
-
-      this.lastPeerSync = { ...sync, at: nowIso() };
-      return { profile: this.profile, sync };
-    } catch (e) {
-      return { profile: this.profile, sync: null };
-    }
+    if (!u || !this.profile) return false;
+    await LocalFolder.writeProfile(u, this.profile);
+    this._pendingSave = false;
+    this._pushServerBridge();
+    return true;
   },
 
-  /* Back-compat aliases used by UI */
+  _pickWinner(a, b) {
+    const scoreA = this._profileScore(a);
+    const scoreB = this._profileScore(b);
+    const timeA = a && a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+    const timeB = b && b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+    const emptyA = this._isEmpty(a);
+    const emptyB = this._isEmpty(b);
+    if (emptyA && !emptyB) return b;
+    if (emptyB && !emptyA) return a;
+    if (emptyA && emptyB) return a || b || null;
+    if (scoreB > scoreA) return b;
+    if (scoreA > scoreB) return a;
+    return timeB > timeA ? b : a;
+  },
+
+  /** One-time: move leftover browser Codex into the folder, then purge browser keys. */
+  async migrateBrowserCacheIntoFolder(username) {
+    const u = (username || this.activeUser || "").toLowerCase();
+    if (!u || !this.folderLinked()) return;
+    let legacy = this._readLocalJson(u);
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const session = JSON.parse(raw);
+        if (session && !this._isEmpty(session)) {
+          if (!legacy || this._profileScore(session) > this._profileScore(legacy)) {
+            legacy = session;
+          }
+        }
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    const folder = await LocalFolder.readProfile(u);
+    let winner = this._pickWinner(folder, legacy);
+    if (winner && !this._isEmpty(winner)) {
+      await LocalFolder.writeProfile(u, this._migrateProfile(winner));
+      this.profile = this._migrateProfile(winner);
+      this.profile.onboarded = true;
+    }
+    this.purgeBrowserCodex();
+  },
+
+  /**
+   * Merge PC folder + server bridge (same username; paths can differ).
+   * Writes winner back to folder and server so every PC stays live.
+   */
+  async syncWithLocalFolder() {
+    if (!this.folderLinked()) {
+      return { synced: false, reason: "not-linked" };
+    }
+    const u =
+      this.activeUser ||
+      (typeof Sync !== "undefined" && Sync.username()
+        ? Sync.username().toLowerCase()
+        : null);
+    if (!u) return { synced: false, reason: "no-user" };
+    if (!this.profile) this.loadForUser(u);
+
+    let folderProfile = null;
+    try {
+      folderProfile = await LocalFolder.readProfile(u);
+    } catch (e) {
+      return { synced: false, reason: e.message || "read-failed" };
+    }
+
+    let serverProfile = null;
+    if (typeof Sync !== "undefined" && Sync.token() && Sync.getProfile) {
+      try {
+        const data = await Sync.getProfile();
+        serverProfile = data.profile || null;
+      } catch (e) {
+        /* offline — folder only */
+      }
+    }
+
+    let winner = this._pickWinner(this.profile, folderProfile);
+    winner = this._pickWinner(winner, serverProfile);
+    if (!winner) {
+      winner = this.profile || DEFAULT_PROFILE();
+    }
+
+    const before = this._profileScore(this.profile);
+    this.profile = this._migrateProfile({ ...winner });
+    this.profile.onboarded = true;
+    if (!this.profile.updatedAt) this.profile.updatedAt = nowIso();
+
+    await LocalFolder.writeProfile(u, this.profile);
+    if (typeof Sync !== "undefined" && Sync.token() && !this._isEmpty(this.profile)) {
+      try {
+        const res = await Sync.putProfile(this.profile);
+        if (res && res.profile) {
+          this.profile = this._migrateProfile(res.profile);
+          await LocalFolder.writeProfile(u, this.profile);
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    const after = this._profileScore(this.profile);
+    return {
+      synced: true,
+      source: "folder+bridge",
+      pulled: after > before || Boolean(folderProfile || serverProfile),
+      pushed: true,
+    };
+  },
+
+  async ensureFolderReady(username, displayName) {
+    this.loadForUser(username, displayName);
+    if (!this.folderLinked()) {
+      if (typeof LocalFolder !== "undefined") {
+        await LocalFolder.restore();
+      }
+    }
+    if (!this.folderLinked()) {
+      return { ok: false, reason: "not-linked" };
+    }
+    await this.migrateBrowserCacheIntoFolder(username);
+    await this.syncWithLocalFolder();
+    return { ok: true, profile: this.profile };
+  },
+
+  _peerTimer: null,
+  _schedulePeerSync() {},
+
+  lastPeerSync: null,
+
+  /** Fetch/update: PC folder + server bridge for the same username. */
+  async syncWithPeers() {
+    const r = await this.syncWithLocalFolder();
+    const sync = {
+      source: r.source || "folder",
+      pushed: Boolean(r.pushed),
+      pulled: Boolean(r.pulled),
+      peers: 1,
+      youAreWinner: true,
+      folder: true,
+    };
+    this.lastPeerSync = { ...sync, at: nowIso() };
+    return { profile: this.profile, sync: r.synced ? sync : null };
+  },
+
   async pushToCloud() {
     return this.syncWithPeers();
   },
@@ -440,34 +436,33 @@ const Store = {
     if (!remote || typeof remote !== "object") return;
     this.profile = this._migrateProfile({ ...remote });
     this.profile.onboarded = true;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-    if (this.activeUser) this._writeLocalJson(this.activeUser, this.profile);
+    this._scheduleFolderWrite();
   },
 
   async syncAfterAuth(username, displayName) {
-    this.loadForUser(username, displayName);
-    // Pulse a few times so we catch other online PCs (same as username transfer)
-    let last = await this.syncWithPeers();
-    for (let i = 0; i < 2; i++) {
-      await new Promise((r) => setTimeout(r, 600));
-      last = await this.syncWithPeers();
-      if (last.sync && last.sync.pulled) break;
-    }
-    return (
-      last.sync || {
-        source: "local",
+    const ready = await this.ensureFolderReady(username, displayName);
+    if (!ready.ok) {
+      return {
+        source: "folder",
         pushed: false,
         pulled: false,
-        peers: 1,
-      }
-    );
+        peers: 0,
+        needsFolder: true,
+      };
+    }
+    return {
+      source: "folder",
+      pushed: false,
+      pulled: true,
+      peers: 1,
+      needsFolder: false,
+    };
   },
 
   clearLocal() {
-    // Clears session cache only — keeps kritx.user.<name> local JSON
     this.profile = DEFAULT_PROFILE();
     this.activeUser = null;
-    localStorage.removeItem(STORAGE_KEY);
+    this.purgeBrowserCodex();
   },
 
   _sumHours(task) {
@@ -865,8 +860,12 @@ const Store = {
     if (!data || typeof data !== "object" || !Array.isArray(data.tasks)) {
       throw new Error("That doesn't look like a Codex backup file.");
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    this.load();
+    if (!this.folderLinked()) {
+      throw new Error("Link your PC data folder first, then import into it.");
+    }
+    this.profile = this._migrateProfile(data);
+    this.profile.onboarded = true;
+    this.profile.updatedAt = nowIso();
     this.save();
   },
 
@@ -879,22 +878,16 @@ const Store = {
     if (username) this.clearUserData(username);
     this.profile = DEFAULT_PROFILE();
     this.activeUser = null;
-    localStorage.removeItem(STORAGE_KEY);
+    this.purgeBrowserCodex();
   },
 
-  /** Full local wipe for a username (learning JSON + indexes). */
+  /** Full wipe of in-memory Codex + legacy browser keys (folder files stay). */
   eraseAccountLocal(username) {
     const u = (username || "").toLowerCase();
     if (u) this.clearUserData(u);
     this.profile = DEFAULT_PROFILE();
     this.activeUser = null;
-    localStorage.removeItem(STORAGE_KEY);
-    // Clear legacy session cache leftovers
-    try {
-      localStorage.removeItem(`kritx.autobackup.v1.${u}`);
-    } catch (e) {
-      /* ignore */
-    }
+    this.purgeBrowserCodex();
   },
 
   // ---------- derived stats ----------
