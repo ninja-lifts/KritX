@@ -1,9 +1,9 @@
 /*
- * Store — LOCAL-FIRST learning data + live peer sync.
+ * Store — LOCAL-FIRST learning data + live peer transfer (same path as usernames).
  *
- * Each device keeps:  kritx.user.<username>  →  full JSON (source of truth)
- * Server never saves learning data. While other PCs are online with the same
- * login, /api/presence shares the richest copy in RAM only.
+ * Each device keeps:  kritx.user.<username>  →  Codex JSON (source of truth)
+ * Online PCs share via /api/heartbeat (RAM only): richest Codex wins for that user.
+ * Server never writes learning data to disk.
  */
 
 const STORAGE_KEY = "codex.profile.v1"; // active session cache
@@ -438,9 +438,15 @@ const Store = {
 
   async syncAfterAuth(username, displayName) {
     this.loadForUser(username, displayName);
-    const { sync } = await this.syncWithPeers();
+    // Pulse a few times so we catch other online PCs (same as username transfer)
+    let last = await this.syncWithPeers();
+    for (let i = 0; i < 2; i++) {
+      await new Promise((r) => setTimeout(r, 600));
+      last = await this.syncWithPeers();
+      if (last.sync && last.sync.pulled) break;
+    }
     return (
-      sync || {
+      last.sync || {
         source: "local",
         pushed: false,
         pulled: false,

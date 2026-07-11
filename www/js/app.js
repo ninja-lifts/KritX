@@ -85,11 +85,11 @@ function syncToast(result) {
   if (!result) return;
   const peers = result.peers || 1;
   if (result.pulled) {
-    toast(`Got newer data from another online PC (${peers} online) ☁`);
+    toast(`Codex updated from another online PC (${peers} online)`);
   } else if (peers > 1 && result.youAreWinner) {
-    toast(`This PC is newest — shared with ${peers - 1} other PC${peers - 1 === 1 ? "" : "s"} ☁`);
+    toast(`This PC’s Codex is newest — shared with ${peers - 1} other PC${peers - 1 === 1 ? "" : "s"}`);
   } else if (peers <= 1) {
-    toast("Saved locally · no other PCs online to sync");
+    toast("Saved locally · open another PC with the same login to share Codex");
   }
 }
 
@@ -1619,7 +1619,7 @@ function renderProfile() {
     <div class="settings-card">
       <button class="settings-row" id="syncNowBtn">
         <span class="sr-ico">☁</span>
-        <span class="sr-body"><span class="sr-title">Sync with online PCs</span><span class="sr-sub">Share/get the newest data from PCs that are open now</span></span>
+        <span class="sr-body"><span class="sr-title">Sync with online PCs</span><span class="sr-sub">Share usernames + Codex live (richest copy wins)</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="exportBtn">
@@ -1644,7 +1644,7 @@ function renderProfile() {
         <span class="sr-arrow">›</span>
       </button>
     </div>
-    <p class="muted small" style="margin-top:10px">Server never stores your Codex — only password login. If 2–3 PCs are open with the same account, the one with the newest/most data is shared to the others automatically.</p>
+    <p class="muted small" style="margin-top:10px">Usernames and Codex move the same way: while PCs are open, the newest/most complete copy is shared live in memory. Server never keeps your Codex on disk.</p>
     <p class="app-footer">kritX · your personal learning OS</p>
   `;
 
@@ -2566,9 +2566,11 @@ async function refreshUserList() {
     byName.set(u.username, {
       username: u.username,
       name: u.name || prev.name || u.username,
-      onServer: true,
+      onServer: u.registered === true,
       local: Boolean(prev.local),
       cached: Boolean(prev.cached),
+      seed: Boolean(u.seed),
+      live: Boolean(u.live),
       tasks: prev.tasks || 0,
       skills: prev.skills || 0,
     });
@@ -2580,11 +2582,12 @@ async function refreshUserList() {
   });
 
   if (hint) {
-    hint.textContent = serverUsers.length
-      ? `${serverUsers.length} registered account${serverUsers.length === 1 ? "" : "s"} on the server — tap yours, then enter password.`
+    const ready = users.filter((u) => u.onServer).length;
+    hint.textContent = ready
+      ? `${ready} account${ready === 1 ? "" : "s"} ready to log in — tap yours, then enter password.`
       : users.length
-      ? "No accounts on the server right now (host may have reset). Tap a username → Create account with the same name + password to reclaim."
-      : "No accounts yet — create one below. It will show here next time.";
+      ? "Usernames listed below. If login fails after a host reset, tap yours → Create / reclaim with the same password."
+      : "No accounts yet — create one below.";
   }
 
   if (!users.length) {
@@ -2596,8 +2599,10 @@ async function refreshUserList() {
     .map((u) => {
       let badge = "tap to log in";
       if (u.onServer) badge = "ready · tap to log in";
-      else if (u.local) badge = "on this PC · reclaim if login fails";
-      else if (u.cached) badge = "known here · reclaim if login fails";
+      else if (u.live) badge = "seen on another online PC · reclaim to log in";
+      else if (u.seed) badge = "known · tap → enter password (auto-restores if host wiped)";
+      else if (u.local) badge = "on this PC · auto-restore on log in";
+      else if (u.cached) badge = "known here · auto-restore on log in";
       const meta =
         u.local && (u.tasks || u.skills)
           ? ` · ${u.tasks || 0} tasks`
@@ -2625,14 +2630,14 @@ async function refreshUserList() {
       if ($("#reg-name")) $("#reg-name").value = name;
       if (b.dataset.onServer === "1") {
         setAuthMode("login");
+        showAuthError("");
         $("#login-pass").focus();
       } else {
-        // Username known locally but missing on server after wipe → reclaim via register
-        setAuthMode("register");
+        setAuthMode("login");
         showAuthError(
-          "This username isn’t on the server right now. Create account with the SAME username + password to reclaim — you won’t lose local data."
+          `Enter the password for @${user}. If the host wiped logins, kritX will restore the account automatically — same username + password.`
         );
-        $("#reg-pass").focus();
+        $("#login-pass").focus();
       }
     })
   );
@@ -2660,26 +2665,26 @@ function showLoginScreen() {
     }
     $("#loginBtn").disabled = true;
     try {
-      const data = await Sync.login({ username, password });
+      const data = await Sync.loginOrReclaim({
+        username,
+        password,
+        name: username,
+      });
       const sync = await Store.syncAfterAuth(
         data.username,
         data.name || data.username
       );
-      syncToast(sync);
-      if (!sync || (!sync.pulled && !(sync.peers > 1))) {
-        toast("Welcome back, " + (data.name || data.username));
+      if (data.reclaimed) {
+        toast("Host had wiped login — restored @" + data.username + " automatically");
+      } else {
+        syncToast(sync);
+        if (!sync || (!sync.pulled && !(sync.peers > 1))) {
+          toast("Welcome back, " + (data.name || data.username));
+        }
       }
       startApp();
     } catch (e) {
-      const local = Store.peekLocalProfile(username);
-      if (local && !Store._isEmpty(local)) {
-        showAuthError(
-          (e.message || "Login failed.") +
-            " Tip: if the host redeployed, Create account with the same username — your local Codex will upload again."
-        );
-      } else {
-        showAuthError(e.message || "Login failed.");
-      }
+      showAuthError(e.message || "Login failed.");
       refreshUserList();
     } finally {
       $("#loginBtn").disabled = false;
@@ -2748,7 +2753,7 @@ function startApp() {
     if (r.startsWith("market") || r.startsWith("field")) router();
   });
 
-  // Live peer sync every 8s while this PC is open
+  // Live transfer: usernames + Codex together every 8s (same heartbeat)
   if (Sync.token()) {
     setInterval(() => {
       Store.syncWithPeers().catch(() => {});
@@ -2758,6 +2763,8 @@ function startApp() {
 
 async function boot() {
   Store.load();
+  // Always remember seeded usernames (e.g. captain_nick) on this browser
+  Sync.rememberUser("captain_nick", "Nikhil");
 
   if (Sync.token()) {
     try {
@@ -2773,6 +2780,11 @@ async function boot() {
   }
 
   showLoginScreen();
+  // Keep username directory fresh on the login page too
+  setInterval(() => {
+    if (!$("#onboard") || $("#onboard").hidden) return;
+    refreshUserList().catch(() => {});
+  }, 10000);
 }
 
 document.addEventListener("DOMContentLoaded", boot);

@@ -1,14 +1,29 @@
 /*
- * Sync — website auth + live peer sync.
+ * Sync — website auth + live peer sync + live username directory.
  *
- * Learning data stays on each device. While PCs are online with the same
- * username, /api/presence shares the richest copy in RAM only — never disk.
+ * Learning data stays on each device (never saved on server disk).
+ * Usernames are shared while PCs are online (RAM directory) + seed file.
+ * If the host wiped logins, loginOrReclaim recreates the account automatically.
  */
 
 const AUTH_KEY = "kritx.auth.v1";
+const PEER_ID_KEY = "kritx.peerId.v1";
+const KNOWN_USERS_KEY = "kritx.knownUsers.v1";
 
 const Sync = {
   baseUrl: "",
+
+  peerId() {
+    let id = localStorage.getItem(PEER_ID_KEY);
+    if (!id) {
+      id =
+        "p_" +
+        Date.now().toString(36) +
+        Math.random().toString(36).slice(2, 10);
+      localStorage.setItem(PEER_ID_KEY, id);
+    }
+    return id;
+  },
 
   getAuth() {
     try {
@@ -56,34 +71,9 @@ const Sync = {
     return data;
   },
 
-  async listUsers() {
-    const data = await this.request("/api/users", { auth: false });
-    const users = data.users || [];
-    // Cache so the login page still shows names after a host wipe
-    try {
-      const prev = JSON.parse(localStorage.getItem("kritx.knownUsers.v1") || "[]");
-      const map = new Map();
-      for (const u of prev) if (u && u.username) map.set(u.username, u);
-      for (const u of users) {
-        map.set(u.username, {
-          username: u.username,
-          name: u.name || u.username,
-          seenAt: new Date().toISOString(),
-        });
-      }
-      localStorage.setItem(
-        "kritx.knownUsers.v1",
-        JSON.stringify(Array.from(map.values()))
-      );
-    } catch (e) {
-      /* ignore */
-    }
-    return users;
-  },
-
   knownUsers() {
     try {
-      return JSON.parse(localStorage.getItem("kritx.knownUsers.v1") || "[]");
+      return JSON.parse(localStorage.getItem(KNOWN_USERS_KEY) || "[]");
     } catch (e) {
       return [];
     }
@@ -102,13 +92,121 @@ const Sync = {
         name: name || u,
         seenAt: new Date().toISOString(),
       });
-      localStorage.setItem(
-        "kritx.knownUsers.v1",
-        JSON.stringify(Array.from(map.values()))
-      );
+      localStorage.setItem(KNOWN_USERS_KEY, JSON.stringify(Array.from(map.values())));
     } catch (e) {
       /* ignore */
     }
+  },
+
+  collectLocalUsernames() {
+    const map = new Map();
+    for (const u of this.knownUsers()) {
+      if (u && u.username) map.set(u.username, { username: u.username, name: u.name || u.username });
+    }
+    if (typeof Store !== "undefined" && Store.listLocalUsers) {
+      for (const u of Store.listLocalUsers()) {
+        map.set(u.username, {
+          username: u.username,
+          name: u.name || u.username,
+        });
+      }
+    }
+    if (this.username()) {
+      const a = this.getAuth();
+      map.set(this.username(), {
+        username: this.username(),
+        name: (a && a.name) || this.username(),
+      });
+    }
+    return Array.from(map.values());
+  },
+
+  /**
+   * One live transfer pulse — same path for usernames + Codex.
+   * Server keeps both in RAM only while PCs are online.
+   */
+  async heartbeat({ profile } = {}) {
+    const data = await this.request("/api/heartbeat", {
+      method: "POST",
+      auth: Boolean(this.token()),
+      body: {
+        peerId: this.peerId(),
+        users: this.collectLocalUsernames(),
+        profile: profile || undefined,
+      },
+    });
+    if (data.users) {
+      for (const u of data.users) this.rememberUser(u.username, u.name);
+    }
+    return data;
+  },
+
+  async announceDirectory() {
+    try {
+      const data = await this.heartbeat();
+      return data.users || [];
+    } catch (e) {
+      return [];
+    }
+  },
+
+  async listUsers() {
+    let users = [];
+    try {
+      users = await this.announceDirectory();
+    } catch (e) {
+      users = [];
+    }
+    if (!users.length) {
+      try {
+        const data = await this.request("/api/users", { auth: false });
+        users = data.users || [];
+      } catch (e) {
+        users = [];
+      }
+    }
+    try {
+      const seedRes = await fetch(this.baseUrl + "/seed-users.json");
+      if (seedRes.ok) {
+        const seed = await seedRes.json();
+        const map = new Map(users.map((u) => [u.username, u]));
+        for (const u of seed || []) {
+          if (!u || !u.username) continue;
+          const username = String(u.username).toLowerCase();
+          if (!map.has(username)) {
+            map.set(username, {
+              username,
+              name: u.name || username,
+              registered: false,
+              seed: true,
+            });
+          }
+        }
+        users = Array.from(map.values());
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    for (const u of users) this.rememberUser(u.username, u.name);
+    return users;
+  },
+
+  async presence(profile) {
+    const data = await this.heartbeat({ profile });
+    const p = data.presence || {};
+    return {
+      ok: true,
+      peers: p.peers || 1,
+      youAreWinner: Boolean(p.youAreWinner),
+      winner: p.winner,
+      winnerScore: p.winnerScore || 0,
+      users: data.users || [],
+      storesLearningData: false,
+    };
+  },
+
+  async presenceStatus() {
+    return this.presence(null);
   },
 
   async register({ username, password, name }) {
@@ -123,7 +221,8 @@ const Sync = {
       name: data.name,
     });
     this.rememberUser(data.username, data.name);
-    return data;
+    await this.announceDirectory();
+    return { ...data, reclaimed: false };
   },
 
   async login({ username, password }) {
@@ -138,7 +237,34 @@ const Sync = {
       name: data.name,
     });
     this.rememberUser(data.username, data.name);
-    return data;
+    await this.announceDirectory();
+    return { ...data, reclaimed: false };
+  },
+
+  /**
+   * Login normally. If the host wiped accounts, recreate the same username
+   * with the same password automatically (local Codex stays on this PC).
+   */
+  async loginOrReclaim({ username, password, name }) {
+    try {
+      return await this.login({ username, password });
+    } catch (e) {
+      if (e.status !== 401 && e.status !== 400) throw e;
+      try {
+        const data = await this.register({
+          username,
+          password,
+          name: name || username,
+        });
+        return { ...data, reclaimed: true };
+      } catch (e2) {
+        // Race: someone else just reclaimed — try login again
+        if (/taken|already/i.test(e2.message || "")) {
+          return await this.login({ username, password });
+        }
+        throw e;
+      }
+    }
   },
 
   async logout() {
@@ -150,21 +276,9 @@ const Sync = {
     this.setAuth(null);
   },
 
-  /** Announce this PC's local JSON; get the winning copy among online peers. */
-  async presence(profile) {
-    return this.request("/api/presence", {
-      method: "POST",
-      body: { profile },
-    });
-  },
-
-  async presenceStatus() {
-    return this.request("/api/presence");
-  },
-
   async ping() {
     try {
-      await this.listUsers();
+      await this.request("/api/users", { auth: false });
       return true;
     } catch (e) {
       return false;

@@ -31,6 +31,8 @@ fs.mkdirSync(USERS_DIR, { recursive: true });
 
 /** username -> Map(peerId -> { profile, score, updatedAt, lastSeen, name }) */
 const liveRooms = new Map();
+/** peerId -> { users: [{username,name}], lastSeen } — live username transfer between online PCs */
+const liveDirectory = new Map();
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -146,22 +148,99 @@ function sessionUser(req) {
   return { username: s.username, token };
 }
 
+function pruneDirectory() {
+  const now = Date.now();
+  for (const [id, entry] of liveDirectory) {
+    if (now - entry.lastSeen > PEER_TTL_MS) liveDirectory.delete(id);
+  }
+}
+
+function announceDirectory(peerId, users) {
+  const clean = [];
+  const seen = new Set();
+  for (const u of users || []) {
+    const username = safeUsername(u && u.username);
+    if (!username || seen.has(username)) continue;
+    seen.add(username);
+    clean.push({
+      username,
+      name: String((u && u.name) || username).trim() || username,
+    });
+  }
+  liveDirectory.set(peerId, { users: clean, lastSeen: Date.now() });
+  pruneDirectory();
+  return clean.length;
+}
+
+function liveAnnouncedUsers() {
+  pruneDirectory();
+  const map = new Map();
+  for (const entry of liveDirectory.values()) {
+    for (const u of entry.users || []) {
+      map.set(u.username, {
+        username: u.username,
+        name: u.name || u.username,
+        createdAt: null,
+        registered: false,
+        live: true,
+        seed: false,
+      });
+    }
+  }
+  return map;
+}
+
 function listUsers() {
-  if (!fs.existsSync(USERS_DIR)) return [];
-  return fs
-    .readdirSync(USERS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => {
+  const map = new Map();
+
+  // 1) Seed file (always in the repo — survives Render wipes)
+  const seed = readJson(path.join(WWW, "seed-users.json"), []);
+  for (const u of seed) {
+    if (!u || !u.username) continue;
+    const username = String(u.username).toLowerCase();
+    map.set(username, {
+      username,
+      name: u.name || username,
+      createdAt: null,
+      registered: false,
+      seed: true,
+      live: false,
+    });
+  }
+
+  // 2) Usernames announced by any PC that is currently open (RAM only)
+  for (const [username, u] of liveAnnouncedUsers()) {
+    const prev = map.get(username) || {};
+    map.set(username, {
+      ...prev,
+      ...u,
+      name: u.name || prev.name || username,
+      seed: Boolean(prev.seed),
+      live: true,
+    });
+  }
+
+  // 3) Real logins still on disk (until free host wipes them)
+  if (fs.existsSync(USERS_DIR)) {
+    for (const d of fs.readdirSync(USERS_DIR, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
       const meta = readJson(metaPath(d.name), null);
-      if (!meta) return null;
-      return {
+      if (!meta) continue;
+      map.set(meta.username, {
         username: meta.username,
         name: meta.name || meta.username,
         createdAt: meta.createdAt || null,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.username.localeCompare(b.username));
+        registered: true,
+        seed: false,
+        live: Boolean(map.get(meta.username) && map.get(meta.username).live),
+      });
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.registered !== b.registered) return a.registered ? -1 : 1;
+    return a.username.localeCompare(b.username);
+  });
 }
 
 function emptyProfile(name) {
@@ -208,6 +287,15 @@ function pickWinner(username) {
   let best = null;
   let bestScore = -1;
   for (const peer of room.values()) {
+    // Never let an empty Codex beat a real one
+    if (best && !isEmptyProfile(best.profile) && isEmptyProfile(peer.profile)) {
+      continue;
+    }
+    if ((!best || isEmptyProfile(best.profile)) && !isEmptyProfile(peer.profile)) {
+      best = peer;
+      bestScore = profileScore(peer.profile);
+      continue;
+    }
     const s = profileScore(peer.profile);
     if (s > bestScore) {
       best = peer;
@@ -303,7 +391,67 @@ async function handleApi(req, res, pathname) {
     send(res, 200, {
       users,
       count: users.length,
-      note: "All registered usernames from data/users (passwords never included).",
+      note: "Usernames from seed + online PCs + registered logins. Passwords never included. Learning data never stored.",
+    });
+    return;
+  }
+
+  // Unified live transfer: usernames + Codex (RAM only — same idea as user directory)
+  if (pathname === "/api/heartbeat" && req.method === "POST") {
+    const body = await readBody(req);
+    const sess = sessionUser(req);
+    const peerId =
+      (sess && sess.token) ||
+      String(body.peerId || "")
+        .trim()
+        .slice(0, 80) ||
+      crypto.randomBytes(8).toString("hex");
+
+    announceDirectory(peerId, body.users || []);
+
+    let presence = null;
+    if (sess && body.profile && typeof body.profile === "object") {
+      presence = announcePresence(sess.username, sess.token, body.profile);
+    } else if (sess) {
+      pruneRoom(sess.username);
+      const winner = pickWinner(sess.username);
+      const room = liveRooms.get(sess.username);
+      presence = {
+        peers: room ? room.size : 0,
+        youAreWinner: false,
+        winner: winner ? winner.profile : null,
+        winnerScore: winner ? winner.score : 0,
+      };
+    }
+
+    send(res, 200, {
+      ok: true,
+      peerId,
+      users: listUsers(),
+      presence,
+      storesLearningData: false,
+      note: "Usernames + Codex move live between online PCs only. Nothing saved to disk.",
+    });
+    return;
+  }
+
+  // Live username directory — RAM only, shared while PCs are open
+  if (pathname === "/api/directory" && req.method === "POST") {
+    const body = await readBody(req);
+    const sess = sessionUser(req);
+    const peerId =
+      (sess && sess.token) ||
+      String(body.peerId || "")
+        .trim()
+        .slice(0, 80) ||
+      crypto.randomBytes(8).toString("hex");
+    const n = announceDirectory(peerId, body.users || []);
+    send(res, 200, {
+      ok: true,
+      peerId,
+      announced: n,
+      users: listUsers(),
+      storesLearningData: false,
     });
     return;
   }
@@ -486,9 +634,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Drop stale peers periodically so RAM never keeps offline data
+// Drop stale peers / directory entries so RAM never keeps offline data
 setInterval(() => {
   for (const username of [...liveRooms.keys()]) pruneRoom(username);
+  pruneDirectory();
 }, 15000);
 
 server.listen(PORT, "0.0.0.0", () => {
