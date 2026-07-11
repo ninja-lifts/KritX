@@ -226,7 +226,6 @@ textarea { resize: vertical; min-height: 64px; }
   .app { display: flex; height: 100vh; overflow: hidden; padding: 0; }
 
   .tabbar { display: none; }
-  .task-dock { bottom: 16px; }
 
   .sidebar {
     display: flex; flex-direction: column;
@@ -452,25 +451,19 @@ textarea { resize: vertical; min-height: 64px; }
 }
 .detail-head-top .chip-row { flex: 1; }
 
-.task-dock {
-  position: sticky;
-  bottom: calc(78px + var(--safe-bottom));
-  z-index: 20;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+/* Stable action row — under the title, document flow (does not float/jump) */
+.task-actions {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  margin: 20px 0 8px;
-  padding: 12px;
-  border-radius: 16px;
-  background: rgba(11, 14, 26, 0.92);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35);
+  margin: 14px 0 8px;
+  position: static;
 }
-.task-dock .btn { min-height: 44px; font-size: 13px; }
-.task-dock #dockComplete { grid-column: 1 / -1; }
-.task-dock #dockSave:only-of-type + #dockComplete,
-.task-dock #dockComplete:first-child { grid-column: 1 / -1; }
+.task-actions .btn {
+  min-height: 46px;
+  font-size: 14px;
+  width: 100%;
+}
 
 .log-row {
   width: 100%; text-align: left; cursor: pointer;
@@ -593,8 +586,7 @@ textarea { resize: vertical; min-height: 64px; }
 }
 .studied-tag { font-size: 12px; color: var(--teal); font-weight: 600; }
 .sched-tag { font-size: 12px; color: var(--gold); font-weight: 600; }
-.start-today-big { margin-bottom: 6px; }
-.start-hint { font-size: 12.5px; color: var(--text-muted); margin: 0 0 6px; text-align: center; }
+.start-hint { font-size: 12.5px; color: var(--text-muted); margin: 0 0 12px; line-height: 1.45; }
 
 /* ---------- weekday picker ---------- */
 .wd-picker { display: flex; gap: 6px; }
@@ -796,7 +788,7 @@ textarea { resize: vertical; min-height: 64px; }
   .detail-head, .why-box, .worth-card, .timer-card, .calendar, .cal-legend,
   .salary-grid, .salary-extra, .monetize-list, .disclaimer, .detail-footer,
   .note-box, .profile-hero, .highlight-card, .settings-card, .path-list,
-  .market-intro, .codex-intro, .start-hint, .start-today-big, .due-preview {
+  .market-intro, .codex-intro, .start-hint, .task-actions, .due-preview {
     max-width: 820px;
   }
   .path-list, .opp-card { max-width: 820px; }

@@ -513,13 +513,10 @@ function renderTaskDetail(id) {
     <button class="back-btn" data-back>← Tasks</button>
 
     <div class="detail-head reveal">
-      <div class="detail-head-top">
-        <div class="chip-row">
-          <span class="chip">${esc(t.category)}</span>
-          <span class="chip ${pri.cls}">${pri.label}</span>
-          <span class="chip">${difDots(t.difficulty)} difficulty</span>
-        </div>
-        <button class="btn btn-ghost btn-sm" id="editTaskBtn" type="button">✎ Edit task</button>
+      <div class="chip-row">
+        <span class="chip">${esc(t.category)}</span>
+        <span class="chip ${pri.cls}">${pri.label}</span>
+        <span class="chip">${difDots(t.difficulty)} difficulty</span>
       </div>
       <h2 class="detail-title">${esc(t.title)}</h2>
       ${(t.tags || []).length ? `<div class="tag-row">${t.tags
@@ -541,18 +538,26 @@ function renderTaskDetail(id) {
       <div class="detail-meta">${fmtHours(t.loggedHours)}h done (${pct}%)</div>
     </div>
 
+    <div class="task-actions" id="taskActions">
+      ${
+        t.status === "active"
+          ? `<button class="btn btn-teal" type="button" id="saveTodayBtn">${
+              studied ? "📝 Edit today's work" : "📝 Save today's work"
+            }</button>`
+          : ""
+      }
+      <button class="btn btn-primary" type="button" id="completeBtn">📖 Complete → Codex</button>
+      <button class="btn btn-ghost" type="button" id="editTaskBtn">✎ Edit</button>
+    </div>
     ${
       t.status === "active"
-        ? `<button class="btn btn-primary btn-block start-today-big" id="startTodayBtn">${
-            studied ? "📝 Edit today's work" : "📝 Save today's work"
-          }</button>
-           <p class="start-hint">${
-             studied
-               ? "You've logged study for today. Nice."
-               : scheduled
-               ? "Today is a scheduled study day — log where you're learning from."
-               : "Not a scheduled day, but you can still study and log it."
-           }</p>`
+        ? `<p class="start-hint">${
+            studied
+              ? "Today is saved. You can edit it anytime — changes stay on this task until you Complete → Codex."
+              : scheduled
+              ? "Today is a study day — save sources & minutes, then keep going. Complete → Codex when finished."
+              : "Save today's work anytime. Complete → Codex only when the whole task is done."
+          }</p>`
         : ""
     }
 
@@ -590,11 +595,6 @@ function renderTaskDetail(id) {
     <!-- daily study log -->
     <div class="section-head">
       <p class="section-label">Daily study log</p>
-      ${
-        t.status === "active"
-          ? `<button class="link-btn" type="button" id="logTodayBtn">+ Log today</button>`
-          : ""
-      }
     </div>
     <div class="card-list" id="dailyLogList">
       ${
@@ -603,22 +603,11 @@ function renderTaskDetail(id) {
               .sort((a, b) => (a.date < b.date ? 1 : -1))
               .map((l) => dailyLogRow(l, t.id))
               .join("")
-          : `<p class="muted">Nothing logged yet. Tap <b>Save today's work</b> below to record what you studied.</p>`
+          : `<p class="muted">Nothing logged yet. Use <b>Save today's work</b> above.</p>`
       }
-    </div>
-
-    <div class="task-dock" id="taskDock">
-      ${
-        t.status === "active"
-          ? `<button class="btn btn-teal" type="button" id="dockSave">📝 Save today's work</button>`
-          : ""
-      }
-      <button class="btn btn-primary" type="button" id="dockComplete">📖 Complete → Codex</button>
-      <button class="btn btn-ghost" type="button" id="dockEdit">✎ Edit</button>
     </div>
 
     <div class="detail-footer">
-      <button class="btn btn-primary btn-block" id="completeBtn">✓ Complete & add to Codex</button>
       <div class="footer-row">
         <button class="btn btn-ghost" id="pauseBtn">${
           t.status === "paused" ? "Resume" : "⏸ Pause"
@@ -633,16 +622,10 @@ function renderTaskDetail(id) {
     openWorthModal({ title: t.title, category: t.category, tags: t.tags })
   );
 
-  const startBtn = $("#startTodayBtn");
-  if (startBtn) startBtn.addEventListener("click", () => openDailyModal(t.id));
-
+  const saveTodayBtn = $("#saveTodayBtn");
+  if (saveTodayBtn) saveTodayBtn.addEventListener("click", () => openDailyModal(t.id));
   $("#editTaskBtn").addEventListener("click", () => openEditTaskModal(t.id));
-  $("#dockEdit").addEventListener("click", () => openEditTaskModal(t.id));
-  const dockSave = $("#dockSave");
-  if (dockSave) dockSave.addEventListener("click", () => openDailyModal(t.id));
-  const logTodayBtn = $("#logTodayBtn");
-  if (logTodayBtn) logTodayBtn.addEventListener("click", () => openDailyModal(t.id));
-  $("#dockComplete").addEventListener("click", () => openCompleteModal(t.id));
+  $("#completeBtn").addEventListener("click", () => openCompleteModal(t.id));
 
   $all("[data-edit-log]", view).forEach((row) =>
     row.addEventListener("click", () =>
@@ -653,13 +636,12 @@ function renderTaskDetail(id) {
   // timer
   setupTimer(t.id);
 
-  $("#completeBtn").addEventListener("click", () => openCompleteModal(t.id));
   $("#pauseBtn").addEventListener("click", () => {
     if (t.status !== "paused") {
       openPauseModal(t.id);
     } else {
       Store.pauseTask(t.id);
-      renderTaskDetail(id);
+      softRefreshTaskDetail(id);
     }
   });
   $("#deleteBtn").addEventListener("click", () => {
@@ -667,6 +649,17 @@ function renderTaskDetail(id) {
       Store.deleteTask(t.id);
       navigate("tasks");
     });
+  });
+}
+
+function softRefreshTaskDetail(taskId) {
+  const content = document.querySelector(".content") || document.documentElement;
+  const y = content.scrollTop || window.scrollY || 0;
+  renderTaskDetail(taskId);
+  requestAnimationFrame(() => {
+    const again = document.querySelector(".content");
+    if (again) again.scrollTop = y;
+    else window.scrollTo(0, y);
   });
 }
 
@@ -772,7 +765,7 @@ function setupTimer(taskId) {
     const mins = Math.max(1, Math.round(Timer.seconds / 60));
     Store.logSession(taskId, mins, "Timed session");
     toast(`Logged ${mins} min`);
-    renderTaskDetail(taskId);
+    softRefreshTaskDetail(taskId);
   });
 
   $("#manualLog").addEventListener("click", () => openLogModal(taskId));
@@ -1982,7 +1975,7 @@ function openEditTaskModal(taskId) {
     });
     close();
     toast("Task updated ✓");
-    renderTaskDetail(taskId);
+    softRefreshTaskDetail(taskId);
   });
 }
 
@@ -2202,7 +2195,7 @@ function openDailyModal(taskId, logId = null) {
     }
     close();
     toast(editing ? "Study log updated ✓" : "Today's work saved ✓");
-    if (currentRoute().startsWith("task/")) renderTaskDetail(taskId);
+    if (currentRoute().startsWith("task/")) softRefreshTaskDetail(taskId);
     else router();
   });
 }
@@ -2228,7 +2221,7 @@ function openLogModal(taskId) {
     Store.logSession(taskId, min, $("#log-note").value);
     close();
     toast(`Logged ${min} min`);
-    renderTaskDetail(taskId);
+    softRefreshTaskDetail(taskId);
   });
 }
 
@@ -2374,7 +2367,7 @@ function openPauseModal(taskId) {
   $("#pause-save").addEventListener("click", () => {
     Store.pauseTask(taskId, $("#pause-reason").value);
     close();
-    renderTaskDetail(taskId);
+    softRefreshTaskDetail(taskId);
   });
 }
 
