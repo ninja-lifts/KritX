@@ -299,7 +299,12 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === "/api/users" && req.method === "GET") {
-    send(res, 200, { users: listUsers() });
+    const users = listUsers();
+    send(res, 200, {
+      users,
+      count: users.length,
+      note: "All registered usernames from data/users (passwords never included).",
+    });
     return;
   }
 

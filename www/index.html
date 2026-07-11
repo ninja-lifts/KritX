@@ -24,14 +24,18 @@
       Can't reach the kritX server. Check your internet connection, or wait a moment if the site just woke up.
     </div>
 
+    <div class="field">
+      <label>All usernames — tap yours</label>
+      <div class="user-list" id="userList">
+        <p class="muted small">Loading users…</p>
+      </div>
+      <p class="muted small" id="userListHint" style="margin-top:8px">
+        Pick your username, enter your password, and log in. No need to create the account again.
+      </p>
+    </div>
+
     <!-- Login mode -->
     <div id="authLogin">
-      <div class="field">
-        <label>Accounts</label>
-        <div class="user-list" id="userList">
-          <p class="muted small">Loading users…</p>
-        </div>
-      </div>
       <div class="field">
         <label for="login-user">Username</label>
         <input type="text" id="login-user" autocomplete="username" placeholder="Select above or type">
@@ -50,7 +54,7 @@
     <!-- Register mode -->
     <div id="authRegister" hidden>
       <div class="field">
-        <label for="reg-user">Choose a username</label>
+        <label for="reg-user">Username</label>
         <input type="text" id="reg-user" autocomplete="username" placeholder="e.g. arjun">
       </div>
       <div class="field">
@@ -58,14 +62,14 @@
         <input type="text" id="reg-name" autocomplete="name" placeholder="e.g. Arjun">
       </div>
       <div class="field">
-        <label for="reg-pass">Create a private password</label>
+        <label for="reg-pass">Password</label>
         <input type="password" id="reg-pass" autocomplete="new-password" placeholder="at least 4 characters">
       </div>
       <div class="field">
         <label for="reg-pass2">Confirm password</label>
         <input type="password" id="reg-pass2" autocomplete="new-password" placeholder="••••••••">
       </div>
-      <button class="btn btn-primary btn-block" id="registerBtn">Create account</button>
+      <button class="btn btn-primary btn-block" id="registerBtn">Create / reclaim account</button>
       <div class="auth-toggle">
         <span>Already have an account?</span>
         <button type="button" id="showLogin">Log in instead</button>

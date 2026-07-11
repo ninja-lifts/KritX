@@ -2526,7 +2526,9 @@ function setAuthMode(mode) {
 
 async function refreshUserList() {
   const list = $("#userList");
+  const hint = $("#userListHint");
   const localUsers = Store.listLocalUsers();
+  const cached = typeof Sync.knownUsers === "function" ? Sync.knownUsers() : [];
   let serverUsers = [];
   try {
     serverUsers = await Sync.listUsers();
@@ -2536,12 +2538,15 @@ async function refreshUserList() {
   }
 
   const byName = new Map();
-  for (const u of serverUsers) {
+
+  for (const u of cached) {
+    if (!u || !u.username) continue;
     byName.set(u.username, {
       username: u.username,
       name: u.name || u.username,
-      onServer: true,
+      onServer: false,
       local: false,
+      cached: true,
     });
   }
   for (const u of localUsers) {
@@ -2551,32 +2556,55 @@ async function refreshUserList() {
       name: u.name || prev.name || u.username,
       onServer: Boolean(prev.onServer),
       local: true,
+      cached: Boolean(prev.cached),
       tasks: u.tasks || 0,
       skills: u.skills || 0,
     });
   }
+  for (const u of serverUsers) {
+    const prev = byName.get(u.username) || {};
+    byName.set(u.username, {
+      username: u.username,
+      name: u.name || prev.name || u.username,
+      onServer: true,
+      local: Boolean(prev.local),
+      cached: Boolean(prev.cached),
+      tasks: prev.tasks || 0,
+      skills: prev.skills || 0,
+    });
+  }
 
-  const users = Array.from(byName.values()).sort((a, b) =>
-    a.username.localeCompare(b.username)
-  );
+  const users = Array.from(byName.values()).sort((a, b) => {
+    if (a.onServer !== b.onServer) return a.onServer ? -1 : 1;
+    return a.username.localeCompare(b.username);
+  });
+
+  if (hint) {
+    hint.textContent = serverUsers.length
+      ? `${serverUsers.length} registered account${serverUsers.length === 1 ? "" : "s"} on the server — tap yours, then enter password.`
+      : users.length
+      ? "No accounts on the server right now (host may have reset). Tap a username → Create account with the same name + password to reclaim."
+      : "No accounts yet — create one below. It will show here next time.";
+  }
 
   if (!users.length) {
-    list.innerHTML = `<p class="muted small">No accounts yet — create one below. After a host redeploy, create the same username again on this PC to restore local data.</p>`;
+    list.innerHTML = `<p class="muted small">No usernames yet. Use <b>Create an account</b> once — then your name stays in this list.</p>`;
     return;
   }
 
   list.innerHTML = users
     .map((u) => {
-      const badge = u.local
-        ? u.onServer
-          ? "local + transfer"
-          : "local only · re-create account if login fails"
-        : "on server";
+      let badge = "tap to log in";
+      if (u.onServer) badge = "ready · tap to log in";
+      else if (u.local) badge = "on this PC · reclaim if login fails";
+      else if (u.cached) badge = "known here · reclaim if login fails";
       const meta =
         u.local && (u.tasks || u.skills)
           ? ` · ${u.tasks || 0} tasks`
           : "";
-      return `<button type="button" class="user-chip" data-user="${esc(u.username)}">
+      return `<button type="button" class="user-chip${u.onServer ? " on-server" : ""}" data-user="${esc(
+        u.username
+      )}" data-name="${esc(u.name || u.username)}" data-on-server="${u.onServer ? "1" : "0"}">
         <span class="user-chip-av">${esc(initials(u.name || u.username))}</span>
         <span class="user-chip-body">
           <span class="user-chip-name">@${esc(u.username)}</span>
@@ -2588,8 +2616,24 @@ async function refreshUserList() {
 
   $all(".user-chip", list).forEach((b) =>
     b.addEventListener("click", () => {
-      $("#login-user").value = b.dataset.user;
-      $("#login-pass").focus();
+      $all(".user-chip", list).forEach((x) => x.classList.remove("sel"));
+      b.classList.add("sel");
+      const user = b.dataset.user;
+      const name = b.dataset.name || user;
+      $("#login-user").value = user;
+      if ($("#reg-user")) $("#reg-user").value = user;
+      if ($("#reg-name")) $("#reg-name").value = name;
+      if (b.dataset.onServer === "1") {
+        setAuthMode("login");
+        $("#login-pass").focus();
+      } else {
+        // Username known locally but missing on server after wipe → reclaim via register
+        setAuthMode("register");
+        showAuthError(
+          "This username isn’t on the server right now. Create account with the SAME username + password to reclaim — you won’t lose local data."
+        );
+        $("#reg-pass").focus();
+      }
     })
   );
 }
@@ -2636,6 +2680,7 @@ function showLoginScreen() {
       } else {
         showAuthError(e.message || "Login failed.");
       }
+      refreshUserList();
     } finally {
       $("#loginBtn").disabled = false;
     }

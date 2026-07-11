@@ -58,7 +58,57 @@ const Sync = {
 
   async listUsers() {
     const data = await this.request("/api/users", { auth: false });
-    return data.users || [];
+    const users = data.users || [];
+    // Cache so the login page still shows names after a host wipe
+    try {
+      const prev = JSON.parse(localStorage.getItem("kritx.knownUsers.v1") || "[]");
+      const map = new Map();
+      for (const u of prev) if (u && u.username) map.set(u.username, u);
+      for (const u of users) {
+        map.set(u.username, {
+          username: u.username,
+          name: u.name || u.username,
+          seenAt: new Date().toISOString(),
+        });
+      }
+      localStorage.setItem(
+        "kritx.knownUsers.v1",
+        JSON.stringify(Array.from(map.values()))
+      );
+    } catch (e) {
+      /* ignore */
+    }
+    return users;
+  },
+
+  knownUsers() {
+    try {
+      return JSON.parse(localStorage.getItem("kritx.knownUsers.v1") || "[]");
+    } catch (e) {
+      return [];
+    }
+  },
+
+  rememberUser(username, name) {
+    const u = String(username || "")
+      .trim()
+      .toLowerCase();
+    if (!u) return;
+    try {
+      const list = this.knownUsers();
+      const map = new Map(list.map((x) => [x.username, x]));
+      map.set(u, {
+        username: u,
+        name: name || u,
+        seenAt: new Date().toISOString(),
+      });
+      localStorage.setItem(
+        "kritx.knownUsers.v1",
+        JSON.stringify(Array.from(map.values()))
+      );
+    } catch (e) {
+      /* ignore */
+    }
   },
 
   async register({ username, password, name }) {
@@ -72,6 +122,7 @@ const Sync = {
       username: data.username,
       name: data.name,
     });
+    this.rememberUser(data.username, data.name);
     return data;
   },
 
@@ -86,6 +137,7 @@ const Sync = {
       username: data.username,
       name: data.name,
     });
+    this.rememberUser(data.username, data.name);
     return data;
   },
 
