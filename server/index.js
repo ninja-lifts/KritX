@@ -33,6 +33,9 @@ fs.mkdirSync(USERS_DIR, { recursive: true });
 const liveRooms = new Map();
 /** peerId -> { users: [{username,name}], lastSeen } — live username transfer between online PCs */
 const liveDirectory = new Map();
+/** usernames deleted while peers are online — suppressed until TTL */
+const accountTombstones = new Map(); // username -> expiresAt
+const TOMBSTONE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -148,6 +151,29 @@ function sessionUser(req) {
   return { username: s.username, token };
 }
 
+function pruneTombstones() {
+  const now = Date.now();
+  for (const [u, expires] of accountTombstones) {
+    if (expires < now) accountTombstones.delete(u);
+  }
+}
+
+function addTombstone(username) {
+  const u = safeUsername(username);
+  if (!u) return;
+  accountTombstones.set(u, Date.now() + TOMBSTONE_TTL_MS);
+}
+
+function isTombstoned(username) {
+  pruneTombstones();
+  return accountTombstones.has(String(username || "").toLowerCase());
+}
+
+function activeTombstones() {
+  pruneTombstones();
+  return Array.from(accountTombstones.keys());
+}
+
 function pruneDirectory() {
   const now = Date.now();
   for (const [id, entry] of liveDirectory) {
@@ -161,6 +187,7 @@ function announceDirectory(peerId, users) {
   for (const u of users || []) {
     const username = safeUsername(u && u.username);
     if (!username || seen.has(username)) continue;
+    if (isTombstoned(username)) continue;
     seen.add(username);
     clean.push({
       username,
@@ -198,6 +225,7 @@ function listUsers() {
   for (const u of seed) {
     if (!u || !u.username) continue;
     const username = String(u.username).toLowerCase();
+    if (isTombstoned(username)) continue;
     map.set(username, {
       username,
       name: u.name || username,
@@ -210,6 +238,7 @@ function listUsers() {
 
   // 2) Usernames announced by any PC that is currently open (RAM only)
   for (const [username, u] of liveAnnouncedUsers()) {
+    if (isTombstoned(username)) continue;
     const prev = map.get(username) || {};
     map.set(username, {
       ...prev,
@@ -226,6 +255,7 @@ function listUsers() {
       if (!d.isDirectory()) continue;
       const meta = readJson(metaPath(d.name), null);
       if (!meta) continue;
+      if (isTombstoned(meta.username)) continue;
       map.set(meta.username, {
         username: meta.username,
         name: meta.name || meta.username,
@@ -339,13 +369,45 @@ function leavePresence(username, peerId) {
   if (room.size === 0) liveRooms.delete(username);
 }
 
+function deleteUserAccount(username) {
+  const u = safeUsername(username);
+  if (!u) return false;
+  const dir = userDir(u);
+  if (fs.existsSync(dir)) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      console.error("Failed to remove user dir", u, e);
+      return false;
+    }
+  }
+  // Drop all sessions for this user
+  const sessions = loadSessions();
+  let changed = false;
+  for (const [token, s] of Object.entries(sessions)) {
+    if (s.username === u) {
+      delete sessions[token];
+      changed = true;
+    }
+  }
+  if (changed) saveSessions(sessions);
+  // Drop live presence + directory mentions
+  liveRooms.delete(u);
+  for (const [peerId, entry] of liveDirectory) {
+    entry.users = (entry.users || []).filter((x) => x.username !== u);
+    if (!entry.users.length) liveDirectory.delete(peerId);
+  }
+  addTombstone(u);
+  return true;
+}
+
 function send(res, status, data, headers = {}) {
   const body = typeof data === "string" ? data : JSON.stringify(data);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     ...headers,
   });
   res.end(body);
@@ -409,6 +471,17 @@ async function handleApi(req, res, pathname) {
 
     announceDirectory(peerId, body.users || []);
 
+    // Propagate local deletes only for accounts already gone from disk
+    // (DELETE /api/account is the primary tombstone path; this helps offline wipes).
+    // Never tombstone an active registered login from a client-supplied list.
+    if (Array.isArray(body.forgotten)) {
+      for (const u of body.forgotten) {
+        const name = safeUsername(u);
+        if (!name) continue;
+        if (!fs.existsSync(metaPath(name))) addTombstone(name);
+      }
+    }
+
     let presence = null;
     if (sess && body.profile && typeof body.profile === "object") {
       presence = announcePresence(sess.username, sess.token, body.profile);
@@ -429,6 +502,7 @@ async function handleApi(req, res, pathname) {
       peerId,
       users: listUsers(),
       presence,
+      tombstones: activeTombstones(),
       storesLearningData: false,
       note: "Usernames + Codex move live between online PCs only. Nothing saved to disk.",
     });
@@ -475,6 +549,8 @@ async function handleApi(req, res, pathname) {
       send(res, 400, { error: "That username is already taken." });
       return;
     }
+    // Explicit create clears delete tombstone
+    accountTombstones.delete(username);
     const { salt, hash } = hashPassword(password);
     fs.mkdirSync(userDir(username), { recursive: true });
     writeJson(metaPath(username), {
@@ -529,6 +605,24 @@ async function handleApi(req, res, pathname) {
       saveSessions(sessions);
     }
     send(res, 200, { ok: true });
+    return;
+  }
+
+  // Permanently delete this login account (meta + sessions). Learning data is local-only.
+  if (pathname === "/api/account" && req.method === "DELETE") {
+    const sess = sessionUser(req);
+    if (!sess) {
+      send(res, 401, { error: "Not logged in." });
+      return;
+    }
+    const username = sess.username;
+    leavePresence(username, sess.token);
+    const ok = deleteUserAccount(username);
+    if (!ok) {
+      send(res, 500, { error: "Could not delete account." });
+      return;
+    }
+    send(res, 200, { ok: true, deleted: username });
     return;
   }
 
@@ -638,6 +732,7 @@ const server = http.createServer(async (req, res) => {
 setInterval(() => {
   for (const username of [...liveRooms.keys()]) pruneRoom(username);
   pruneDirectory();
+  pruneTombstones();
 }, 15000);
 
 server.listen(PORT, "0.0.0.0", () => {

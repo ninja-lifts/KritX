@@ -376,31 +376,39 @@ const Store = {
     this._writeLocalJson(u, this.profile);
 
     try {
-      const data = await Sync.presence(this.profile);
-      const peers = data.peers || 1;
-      const winner = data.winner;
+      // Don't broadcast an empty Codex into the live room (avoids wiping peers)
+      const sendProfile = this._isEmpty(this.profile) ? null : this.profile;
+      const data = sendProfile
+        ? await Sync.presence(sendProfile)
+        : await Sync.heartbeat({});
+      const presence = data.presence || data;
+      const peers = presence.peers || data.peers || 1;
+      const winner = presence.winner || data.winner;
       const before = this._profileScore(this.profile);
       const after = this._profileScore(winner);
+      const beforeTime = this.profile && this.profile.updatedAt
+        ? new Date(this.profile.updatedAt).getTime()
+        : 0;
+      const afterTime = winner && winner.updatedAt
+        ? new Date(winner.updatedAt).getTime()
+        : 0;
 
       let sync = {
         source: "local",
-        pushed: true,
+        pushed: Boolean(sendProfile),
         pulled: false,
         peers,
-        youAreWinner: Boolean(data.youAreWinner),
+        youAreWinner: Boolean(presence.youAreWinner || data.youAreWinner),
       };
 
-      if (winner && !this._isEmpty(winner) && after > before) {
-        this.applyRemoteProfile(winner);
-        this._writeLocalJson(u, this.profile);
-        sync = {
-          source: "peer",
-          pushed: false,
-          pulled: true,
-          peers,
-          youAreWinner: false,
-        };
-      } else if (winner && this._isEmpty(this.profile) && !this._isEmpty(winner)) {
+      const peerWins =
+        winner &&
+        !this._isEmpty(winner) &&
+        (after > before ||
+          (after === before && afterTime > beforeTime) ||
+          this._isEmpty(this.profile));
+
+      if (peerWins) {
         this.applyRemoteProfile(winner);
         this._writeLocalJson(u, this.profile);
         sync = {
@@ -868,13 +876,24 @@ const Store = {
       (typeof Sync !== "undefined" && Sync.username()
         ? Sync.username().toLowerCase()
         : null);
+    if (username) this.clearUserData(username);
     this.profile = DEFAULT_PROFILE();
-    this.profile.onboarded = true;
-    this.profile.updatedAt = nowIso();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.profile));
-    if (username) {
-      this.activeUser = username;
-      this._writeLocalJson(username, this.profile);
+    this.activeUser = null;
+    localStorage.removeItem(STORAGE_KEY);
+  },
+
+  /** Full local wipe for a username (learning JSON + indexes). */
+  eraseAccountLocal(username) {
+    const u = (username || "").toLowerCase();
+    if (u) this.clearUserData(u);
+    this.profile = DEFAULT_PROFILE();
+    this.activeUser = null;
+    localStorage.removeItem(STORAGE_KEY);
+    // Clear legacy session cache leftovers
+    try {
+      localStorage.removeItem(`kritx.autobackup.v1.${u}`);
+    } catch (e) {
+      /* ignore */
     }
   },
 

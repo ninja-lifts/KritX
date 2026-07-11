@@ -1633,7 +1633,7 @@ function renderProfile() {
       </button>
       <button class="settings-row danger" id="wipeBtn">
         <span class="sr-ico">🗑</span>
-        <span class="sr-body"><span class="sr-title">Erase cloud + local data</span><span class="sr-sub">Wipes this account's learning data</span></span>
+        <span class="sr-body"><span class="sr-title">Delete account</span><span class="sr-sub">Remove login + erase Codex on this device (won't auto-restore)</span></span>
         <span class="sr-arrow">›</span>
       </button>
     </div>
@@ -1693,16 +1693,28 @@ function renderProfile() {
   );
   $("#wipeBtn").addEventListener("click", () =>
     openConfirm(
-      "Erase everything?",
-      "This deletes your local JSON on this device only. Other online PCs keep their own copies.",
+      "Delete this account?",
+      "Removes @" +
+        (Sync.username() || "you") +
+        " from the server and deletes Codex on this device. It will NOT auto-restore on login. Other PCs will drop it when they sync. To use the name again later, Create account manually.",
       async () => {
-        Store.wipe();
+        const username = Sync.username();
         try {
-          await Store.syncWithPeers();
-        } catch (e) {}
+          await Sync.deleteAccount();
+        } catch (e) {
+          toast(e.message || "Server delete failed — clearing local data");
+          Sync.setAuth(null);
+          if (username) Sync.forgetUser(username);
+          Sync.broadcastAuthEvent("deleted", username);
+        }
+        Store.eraseAccountLocal(username);
+        if (typeof Live !== "undefined" && Live.cache) {
+          Live.cache = {};
+          if (Live.save) Live.save();
+        }
+        toast("Account deleted");
         location.hash = "#/home";
-        router();
-        toast("Local data erased");
+        location.reload();
       }
     )
   );
@@ -2522,6 +2534,9 @@ async function refreshUserList() {
   const hint = $("#userListHint");
   const localUsers = Store.listLocalUsers();
   const cached = typeof Sync.knownUsers === "function" ? Sync.knownUsers() : [];
+  const forgotten = new Set(
+    typeof Sync.forgottenUsers === "function" ? Sync.forgottenUsers() : []
+  );
   let serverUsers = [];
   try {
     serverUsers = await Sync.listUsers();
@@ -2533,7 +2548,7 @@ async function refreshUserList() {
   const byName = new Map();
 
   for (const u of cached) {
-    if (!u || !u.username) continue;
+    if (!u || !u.username || forgotten.has(u.username)) continue;
     byName.set(u.username, {
       username: u.username,
       name: u.name || u.username,
@@ -2543,6 +2558,7 @@ async function refreshUserList() {
     });
   }
   for (const u of localUsers) {
+    if (forgotten.has(u.username)) continue;
     const prev = byName.get(u.username) || {};
     byName.set(u.username, {
       username: u.username,
@@ -2555,6 +2571,7 @@ async function refreshUserList() {
     });
   }
   for (const u of serverUsers) {
+    if (forgotten.has(u.username)) continue;
     const prev = byName.get(u.username) || {};
     byName.set(u.username, {
       username: u.username,
@@ -2569,6 +2586,9 @@ async function refreshUserList() {
     });
   }
 
+  // Hide any forgotten usernames
+  for (const name of forgotten) byName.delete(name);
+
   const users = Array.from(byName.values()).sort((a, b) => {
     if (a.onServer !== b.onServer) return a.onServer ? -1 : 1;
     return a.username.localeCompare(b.username);
@@ -2579,7 +2599,7 @@ async function refreshUserList() {
     hint.textContent = ready
       ? `${ready} account${ready === 1 ? "" : "s"} ready to log in — tap yours, then enter password.`
       : users.length
-      ? "Usernames listed below. If login fails after a host reset, tap yours → Create / reclaim with the same password."
+      ? "Usernames listed below. If login fails after a host reset (and you didn't delete the account), tap → Log in to restore."
       : "No accounts yet — create one below.";
   }
 
@@ -2592,10 +2612,10 @@ async function refreshUserList() {
     .map((u) => {
       let badge = "tap to log in";
       if (u.onServer) badge = "ready · tap to log in";
-      else if (u.live) badge = "seen on another online PC · reclaim to log in";
-      else if (u.seed) badge = "known · tap → enter password (auto-restores if host wiped)";
-      else if (u.local) badge = "on this PC · auto-restore on log in";
-      else if (u.cached) badge = "known here · auto-restore on log in";
+      else if (u.live) badge = "seen on another online PC · tap to log in";
+      else if (u.seed) badge = "known · tap → password (restores if host wiped)";
+      else if (u.local) badge = "on this PC · tap to log in";
+      else if (u.cached) badge = "known here · tap to log in";
       const meta =
         u.local && (u.tasks || u.skills)
           ? ` · ${u.tasks || 0} tasks`
@@ -2628,7 +2648,7 @@ async function refreshUserList() {
       } else {
         setAuthMode("login");
         showAuthError(
-          `Enter the password for @${user}. If the host wiped logins, kritX will restore the account automatically — same username + password.`
+          `Enter the password for @${user}. If the host wiped logins (and you didn't delete the account), kritX can restore it automatically.`
         );
         $("#login-pass").focus();
       }
@@ -2756,8 +2776,25 @@ function startApp() {
 
 async function boot() {
   Store.load();
-  // Always remember seeded usernames (e.g. captain_nick) on this browser
-  Sync.rememberUser("captain_nick", "Nikhil");
+
+  // Cross-tab logout / delete
+  window.addEventListener("storage", (e) => {
+    if (e.key !== "kritx.authEvent.v1" || !e.newValue) return;
+    try {
+      const ev = JSON.parse(e.newValue);
+      if (ev.type === "logout" || ev.type === "deleted") {
+        Sync.setAuth(null);
+        if (ev.type === "deleted" && ev.username) {
+          Sync.forgetUser(ev.username);
+          Store.eraseAccountLocal(ev.username);
+        }
+        location.hash = "#/home";
+        location.reload();
+      }
+    } catch (err) {
+      /* ignore */
+    }
+  });
 
   if (Sync.token()) {
     try {
