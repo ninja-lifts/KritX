@@ -83,8 +83,14 @@ function fmtDate(iso) {
 
 function syncToast(result) {
   if (!result) return;
-  if (result.pulled) toast("Downloaded latest from server → saved locally ☁");
-  else if (result.pushed) toast("Uploaded this PC's data to the transfer mailbox ☁");
+  const peers = result.peers || 1;
+  if (result.pulled) {
+    toast(`Got newer data from another online PC (${peers} online) ☁`);
+  } else if (peers > 1 && result.youAreWinner) {
+    toast(`This PC is newest — shared with ${peers - 1} other PC${peers - 1 === 1 ? "" : "s"} ☁`);
+  } else if (peers <= 1) {
+    toast("Saved locally · no other PCs online to sync");
+  }
 }
 
 function relTime(iso) {
@@ -1542,10 +1548,10 @@ function renderProfile() {
     <div class="sync-banner ${Sync.token() ? "ok" : ""}">
       ${
         Sync.token()
-          ? `🟢 <b>@${esc(Sync.username())}</b> — tasks & Codex are <b>local</b> on this PC. The website only transfers the latest copy between devices${
+          ? `🟢 <b>@${esc(Sync.username())}</b> — data stays <b>on this PC</b>. Server never saves it. Online PCs share the newest copy live${
               autoBackupLine ? ` · ${autoBackupLine}` : ""
             }.`
-          : `⚪ Not signed in — log in to open your local save and transfer mailbox.`
+          : `⚪ Not signed in.`
       }
     </div>
 
@@ -1613,7 +1619,7 @@ function renderProfile() {
     <div class="settings-card">
       <button class="settings-row" id="syncNowBtn">
         <span class="sr-ico">☁</span>
-        <span class="sr-body"><span class="sr-title">Transfer sync now</span><span class="sr-sub">Upload this PC or download if another PC is newer</span></span>
+        <span class="sr-body"><span class="sr-title">Sync with online PCs</span><span class="sr-sub">Share/get the newest data from PCs that are open now</span></span>
         <span class="sr-arrow">›</span>
       </button>
       <button class="settings-row" id="exportBtn">
@@ -1638,7 +1644,7 @@ function renderProfile() {
         <span class="sr-arrow">›</span>
       </button>
     </div>
-    <p class="muted small" style="margin-top:10px">Your learning data stays in this browser as local JSON. The link/server is only for opening the site and moving the newest copy to your other devices. After a free-host redeploy, re-create the same username on this PC once — local data uploads again.</p>
+    <p class="muted small" style="margin-top:10px">Server never stores your Codex — only password login. If 2–3 PCs are open with the same account, the one with the newest/most data is shared to the others automatically.</p>
     <p class="app-footer">kritX · your personal learning OS</p>
   `;
 
@@ -1661,9 +1667,9 @@ function renderProfile() {
   });
   $("#syncNowBtn").addEventListener("click", async () => {
     try {
-      const { sync } = await Store.pullFromCloud();
+      const { sync } = await Store.syncWithPeers();
       if (sync) syncToast(sync);
-      else toast("Synced ✓");
+      else toast("Could not reach peer sync");
       renderProfile();
     } catch (e) {
       toast(e.message || "Sync failed");
@@ -1674,8 +1680,8 @@ function renderProfile() {
   $("#importFile").addEventListener("change", async (e) => {
     await importBackup(e);
     try {
-      await Store.pushToCloud();
-      toast("Imported & uploaded to server ✓");
+      await Store.syncWithPeers();
+      toast("Imported & shared with online PCs ✓");
     } catch (err) {
       toast("Imported locally ✓");
     }
@@ -1695,11 +1701,11 @@ function renderProfile() {
   $("#wipeBtn").addEventListener("click", () =>
     openConfirm(
       "Erase everything?",
-      "This deletes your local JSON on this device and clears the transfer mailbox. Your login username can stay — you can start fresh.",
+      "This deletes your local JSON on this device only. Other online PCs keep their own copies.",
       async () => {
         Store.wipe();
         try {
-          await Store.pushToCloud();
+          await Store.syncWithPeers();
         } catch (e) {}
         location.hash = "#/home";
         router();
@@ -2513,8 +2519,8 @@ function setAuthMode(mode) {
   $("#authRegister").hidden = login;
   $("#authTitle").textContent = login ? "Welcome back" : "Create your account";
   $("#authSub").textContent = login
-    ? "Open the website · data stays on this device · server only transfers between PCs."
-    : "Create a username + password. Your Codex is saved locally; the server is just a mailbox.";
+    ? "Data stays on each PC. While PCs are open, the newest copy is shared live — server never saves it."
+    : "Create a username + password for login only. Your Codex is local; online peers sync live.";
   showAuthError("");
 }
 
@@ -2613,11 +2619,10 @@ function showLoginScreen() {
       const data = await Sync.login({ username, password });
       const sync = await Store.syncAfterAuth(
         data.username,
-        data.name || data.username,
-        data.profile
+        data.name || data.username
       );
       syncToast(sync);
-      if (!sync.pulled && !sync.pushed) {
+      if (!sync || (!sync.pulled && !(sync.peers > 1))) {
         toast("Welcome back, " + (data.name || data.username));
       }
       startApp();
@@ -2656,29 +2661,15 @@ function showLoginScreen() {
     }
     $("#registerBtn").disabled = true;
     try {
-      // Prefer existing local JSON for this username (survives host redeploys)
+      const data = await Sync.register({ username, password, name });
+      const sync = await Store.syncAfterAuth(data.username, name);
       const existing = Store.peekLocalProfile(username);
-      const profile = existing
-        ? { ...existing, name: name || existing.name || username, onboarded: true }
-        : {
-            version: 1,
-            name,
-            createdAt: new Date().toISOString(),
-            theme: "midnight",
-            onboarded: true,
-            settings: {},
-            tasks: [],
-            skills: [],
-            updatedAt: new Date().toISOString(),
-          };
-      const data = await Sync.register({ username, password, name, profile });
-      const sync = await Store.syncAfterAuth(data.username, name, data.profile);
-      syncToast(sync);
       if (existing && !Store._isEmpty(existing)) {
-        toast("Account ready · local Codex restored & transferred ☁");
-      } else if (!sync.pulled && !sync.pushed) {
+        toast("Account ready · local Codex loaded");
+      } else {
         toast("Account created · you're signed in");
       }
+      syncToast(sync);
       startApp();
     } catch (e) {
       showAuthError(e.message || "Could not create account.");
@@ -2712,11 +2703,11 @@ function startApp() {
     if (r.startsWith("market") || r.startsWith("field")) router();
   });
 
-  // Sync local ↔ server every 5 min while app is open
+  // Live peer sync every 8s while this PC is open
   if (Sync.token()) {
     setInterval(() => {
-      Store.pullFromCloud().catch(() => {});
-    }, 5 * 60 * 1000);
+      Store.syncWithPeers().catch(() => {});
+    }, 8000);
   }
 }
 
@@ -2726,9 +2717,8 @@ async function boot() {
   if (Sync.token()) {
     try {
       await Sync.request("/api/me");
-      const remote = await Sync.pullProfile();
       const username = Sync.username();
-      const sync = await Store.syncAfterAuth(username, null, remote);
+      const sync = await Store.syncAfterAuth(username);
       startApp();
       syncToast(sync);
       return;

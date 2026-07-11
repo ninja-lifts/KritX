@@ -1,14 +1,14 @@
 /*
- * Sync — website auth + transfer mailbox.
- * Passwords go only to login/register. Learning data is local-first;
- * profile push/pull moves the newest copy between devices.
+ * Sync — website auth + live peer sync.
+ *
+ * Learning data stays on each device. While PCs are online with the same
+ * username, /api/presence shares the richest copy in RAM only — never disk.
  */
 
 const AUTH_KEY = "kritx.auth.v1";
-const SYNC_FLAG = "kritx.syncing";
 
 const Sync = {
-  baseUrl: "", // same origin when served by kritX server
+  baseUrl: "",
 
   getAuth() {
     try {
@@ -61,11 +61,11 @@ const Sync = {
     return data.users || [];
   },
 
-  async register({ username, password, name, profile }) {
+  async register({ username, password, name }) {
     const data = await this.request("/api/register", {
       method: "POST",
       auth: false,
-      body: { username, password, name, profile },
+      body: { username, password, name },
     });
     this.setAuth({
       token: data.token,
@@ -98,20 +98,18 @@ const Sync = {
     this.setAuth(null);
   },
 
-  async pullProfile() {
-    const data = await this.request("/api/profile");
-    return data.profile;
-  },
-
-  async pushProfile(profile) {
-    const data = await this.request("/api/profile", {
-      method: "PUT",
+  /** Announce this PC's local JSON; get the winning copy among online peers. */
+  async presence(profile) {
+    return this.request("/api/presence", {
+      method: "POST",
       body: { profile },
     });
-    return data.profile;
   },
 
-  // Soft check: is the sync API reachable?
+  async presenceStatus() {
+    return this.request("/api/presence");
+  },
+
   async ping() {
     try {
       await this.listUsers();

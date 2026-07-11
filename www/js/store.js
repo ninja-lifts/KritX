@@ -1,11 +1,9 @@
 /*
- * Store — LOCAL-FIRST learning data + server as transfer mailbox.
+ * Store — LOCAL-FIRST learning data + live peer sync.
  *
- * Source of truth on each device:
- *   kritx.user.<username>  →  full JSON (tasks, Codex, settings)
- *
- * Server profile.json is only a mailbox to move data between PCs.
- * Empty server copies never overwrite real local data (e.g. after redeploy).
+ * Each device keeps:  kritx.user.<username>  →  full JSON (source of truth)
+ * Server never saves learning data. While other PCs are online with the same
+ * login, /api/presence shares the richest copy in RAM only.
  */
 
 const STORAGE_KEY = "codex.profile.v1"; // active session cache
@@ -351,64 +349,83 @@ const Store = {
       this.activeUser = Sync.username().toLowerCase();
       this._writeLocalJson(this.activeUser, this.profile);
     }
-    this._scheduleCloudSync();
-    this._scheduleLocalSnapshot();
+    this._schedulePeerSync();
   },
 
-  _cloudTimer: null,
-  _scheduleCloudSync() {
+  _peerTimer: null,
+  _schedulePeerSync() {
     if (typeof Sync === "undefined" || !Sync.token()) return;
-    clearTimeout(this._cloudTimer);
-    this._cloudTimer = setTimeout(() => {
-      Sync.pushProfile(this.profile).catch(() => {});
-    }, 800);
+    clearTimeout(this._peerTimer);
+    this._peerTimer = setTimeout(() => {
+      this.syncWithPeers().catch(() => {});
+    }, 1000);
   },
 
-  _snapshotTimer: null,
-  _scheduleLocalSnapshot() {
-    clearTimeout(this._snapshotTimer);
-    this._snapshotTimer = setTimeout(() => {
-      if (!this.profile) return;
-      const u =
-        this.activeUser ||
-        (typeof Sync !== "undefined" && Sync.username()
-          ? Sync.username().toLowerCase()
-          : null);
-      if (!u) return;
-      this._writeLocalJson(u, this.profile);
-      if (typeof Sync !== "undefined" && Sync.token()) {
-        Sync.pushProfile(this.profile).catch(() => {});
-      }
-    }, 5 * 60 * 1000);
-  },
+  lastPeerSync: null,
 
-  async pushToCloud() {
+  async syncWithPeers() {
     const u =
       this.activeUser ||
       (typeof Sync !== "undefined" && Sync.username()
         ? Sync.username().toLowerCase()
         : null);
-    if (u) this._writeLocalJson(u, this.profile);
-    if (typeof Sync !== "undefined" && Sync.token()) {
-      return Sync.pushProfile(this.profile);
+    if (!u || typeof Sync === "undefined" || !Sync.token()) {
+      return { profile: this.profile, sync: null };
     }
-    return this.profile;
+    if (!this.profile) this.loadForUser(u);
+    this._writeLocalJson(u, this.profile);
+
+    try {
+      const data = await Sync.presence(this.profile);
+      const peers = data.peers || 1;
+      const winner = data.winner;
+      const before = this._profileScore(this.profile);
+      const after = this._profileScore(winner);
+
+      let sync = {
+        source: "local",
+        pushed: true,
+        pulled: false,
+        peers,
+        youAreWinner: Boolean(data.youAreWinner),
+      };
+
+      if (winner && !this._isEmpty(winner) && after > before) {
+        this.applyRemoteProfile(winner);
+        this._writeLocalJson(u, this.profile);
+        sync = {
+          source: "peer",
+          pushed: false,
+          pulled: true,
+          peers,
+          youAreWinner: false,
+        };
+      } else if (winner && this._isEmpty(this.profile) && !this._isEmpty(winner)) {
+        this.applyRemoteProfile(winner);
+        this._writeLocalJson(u, this.profile);
+        sync = {
+          source: "peer",
+          pushed: false,
+          pulled: true,
+          peers,
+          youAreWinner: false,
+        };
+      }
+
+      this.lastPeerSync = { ...sync, at: nowIso() };
+      return { profile: this.profile, sync };
+    } catch (e) {
+      return { profile: this.profile, sync: null };
+    }
+  },
+
+  /* Back-compat aliases used by UI */
+  async pushToCloud() {
+    return this.syncWithPeers();
   },
 
   async pullFromCloud() {
-    const u =
-      typeof Sync !== "undefined" && Sync.username()
-        ? Sync.username().toLowerCase()
-        : this.activeUser;
-    if (!u) return { profile: this.profile, sync: null };
-    try {
-      const remote = await Sync.pullProfile();
-      const result = this.reconcile(u, remote);
-      if (result.pushed) await Sync.pushProfile(this.profile);
-      return { profile: this.profile, sync: result };
-    } catch (e) {
-      return { profile: this.loadForUser(u), sync: null };
-    }
+    return this.syncWithPeers();
   },
 
   applyRemoteProfile(remote) {
@@ -419,16 +436,17 @@ const Store = {
     if (this.activeUser) this._writeLocalJson(this.activeUser, this.profile);
   },
 
-  async syncAfterAuth(username, displayName, remoteProfile) {
-    const result = this.reconcile(username, remoteProfile, displayName);
-    if (result.pushed) {
-      try {
-        await Sync.pushProfile(this.profile);
-      } catch (e) {
-        /* server waking */
+  async syncAfterAuth(username, displayName) {
+    this.loadForUser(username, displayName);
+    const { sync } = await this.syncWithPeers();
+    return (
+      sync || {
+        source: "local",
+        pushed: false,
+        pulled: false,
+        peers: 1,
       }
-    }
-    return result;
+    );
   },
 
   clearLocal() {

@@ -1,12 +1,13 @@
 /**
- * kritX sync server
+ * kritX server
  *
- * Serves the website (www/) and a small API:
- *  - login / register (password hashes only)
- *  - profile GET/PUT as a TRANSFER MAILBOX between devices
+ * Serves the website + auth. Learning data is NEVER saved to disk.
+ * Online PCs for the same username share via an in-memory presence room:
+ * whichever peer has the richest/newest profile wins and is echoed to
+ * all other PCs that are currently online. When everyone disconnects,
+ * that RAM copy is gone.
  *
- * Learning data is LOCAL-FIRST on each browser. The server copy is temporary
- * relay storage so PC A can upload and PC B can download.
+ * Disk only stores: password hashes (meta.json) + login sessions.
  *
  * Run:  npm start
  * Open: http://localhost:5050
@@ -24,8 +25,12 @@ const DATA = path.join(ROOT, "data");
 const USERS_DIR = path.join(DATA, "users");
 const SESSIONS_FILE = path.join(DATA, "sessions.json");
 const PORT = process.env.PORT || 5050;
+const PEER_TTL_MS = 45000;
 
 fs.mkdirSync(USERS_DIR, { recursive: true });
+
+/** username -> Map(peerId -> { profile, score, updatedAt, lastSeen, name }) */
+const liveRooms = new Map();
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -67,9 +72,26 @@ function userDir(username) {
 function metaPath(username) {
   return path.join(userDir(username), "meta.json");
 }
-function profilePath(username) {
-  return path.join(userDir(username), "profile.json");
+
+/** Delete leftover profile.json from older versions (learning data must not live on disk). */
+function scrubSavedProfiles() {
+  try {
+    if (!fs.existsSync(USERS_DIR)) return;
+    for (const name of fs.readdirSync(USERS_DIR)) {
+      const p = path.join(USERS_DIR, name, "profile.json");
+      if (fs.existsSync(p)) {
+        try {
+          fs.unlinkSync(p);
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
 }
+scrubSavedProfiles();
 
 function hashPassword(password, salt) {
   const s = salt || crypto.randomBytes(16).toString("hex");
@@ -96,14 +118,13 @@ function saveSessions(sessions) {
 function createSession(username) {
   const token = crypto.randomBytes(32).toString("hex");
   const sessions = loadSessions();
-  // prune expired
   const now = Date.now();
   for (const [t, s] of Object.entries(sessions)) {
     if (s.expires < now) delete sessions[t];
   }
   sessions[token] = {
     username,
-    expires: now + 1000 * 60 * 60 * 24 * 30, // 30 days
+    expires: now + 1000 * 60 * 60 * 24 * 30,
   };
   saveSessions(sessions);
   return token;
@@ -143,7 +164,7 @@ function listUsers() {
     .sort((a, b) => a.username.localeCompare(b.username));
 }
 
-function defaultProfile(name) {
+function emptyProfile(name) {
   return {
     version: 1,
     name: name || "",
@@ -155,6 +176,79 @@ function defaultProfile(name) {
     skills: [],
     updatedAt: new Date().toISOString(),
   };
+}
+
+function profileScore(p) {
+  if (!p || typeof p !== "object") return 0;
+  const tasks = (p.tasks || []).length;
+  const skills = (p.skills || []).length;
+  const updated = p.updatedAt ? new Date(p.updatedAt).getTime() : 0;
+  return tasks * 10000 + skills * 5000 + updated;
+}
+
+function isEmptyProfile(p) {
+  if (!p || typeof p !== "object") return true;
+  return !(p.tasks || []).length && !(p.skills || []).length;
+}
+
+function pruneRoom(username) {
+  const room = liveRooms.get(username);
+  if (!room) return;
+  const now = Date.now();
+  for (const [id, peer] of room) {
+    if (now - peer.lastSeen > PEER_TTL_MS) room.delete(id);
+  }
+  if (room.size === 0) liveRooms.delete(username);
+}
+
+function pickWinner(username) {
+  pruneRoom(username);
+  const room = liveRooms.get(username);
+  if (!room || room.size === 0) return null;
+  let best = null;
+  let bestScore = -1;
+  for (const peer of room.values()) {
+    const s = profileScore(peer.profile);
+    if (s > bestScore) {
+      best = peer;
+      bestScore = s;
+    } else if (s === bestScore && best) {
+      const a = new Date(peer.updatedAt || 0).getTime();
+      const b = new Date(best.updatedAt || 0).getTime();
+      if (a > b) best = peer;
+    }
+  }
+  return best;
+}
+
+function announcePresence(username, peerId, profile) {
+  if (!liveRooms.has(username)) liveRooms.set(username, new Map());
+  const room = liveRooms.get(username);
+  const clean = profile && typeof profile === "object" ? { ...profile } : emptyProfile();
+  delete clean.password;
+  delete clean.passwordHash;
+  room.set(peerId, {
+    profile: clean,
+    score: profileScore(clean),
+    updatedAt: clean.updatedAt || new Date().toISOString(),
+    lastSeen: Date.now(),
+    name: clean.name || username,
+  });
+  const winner = pickWinner(username);
+  const peers = liveRooms.get(username) ? liveRooms.get(username).size : 0;
+  return {
+    peers,
+    youAreWinner: winner && winner === room.get(peerId),
+    winner: winner ? winner.profile : clean,
+    winnerScore: winner ? winner.score : profileScore(clean),
+  };
+}
+
+function leavePresence(username, peerId) {
+  const room = liveRooms.get(username);
+  if (!room) return;
+  room.delete(peerId);
+  if (room.size === 0) liveRooms.delete(username);
 }
 
 function send(res, status, data, headers = {}) {
@@ -191,9 +285,16 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
-  // Public: list usernames only (no passwords, no hashes)
   if (pathname === "/api/health" && req.method === "GET") {
-    send(res, 200, { ok: true, service: "kritX", users: listUsers().length });
+    let online = 0;
+    for (const room of liveRooms.values()) online += room.size;
+    send(res, 200, {
+      ok: true,
+      service: "kritX",
+      users: listUsers().length,
+      onlinePeers: online,
+      storesLearningData: false,
+    });
     return;
   }
 
@@ -230,18 +331,14 @@ async function handleApi(req, res, pathname) {
       salt,
       createdAt: new Date().toISOString(),
     });
-    const profile = body.profile && typeof body.profile === "object"
-      ? { ...body.profile, name: name || body.profile.name || username, onboarded: true }
-      : defaultProfile(name || username);
-    if (!profile.updatedAt) profile.updatedAt = new Date().toISOString();
-    writeJson(profilePath(username), profile);
+    // Never save learning data — client keeps local JSON
     const token = createSession(username);
     send(res, 200, {
       ok: true,
       token,
       username,
       name: name || username,
-      profile,
+      profile: null,
     });
     return;
   }
@@ -259,14 +356,13 @@ async function handleApi(req, res, pathname) {
       send(res, 401, { error: "Incorrect username or password." });
       return;
     }
-    const profile = readJson(profilePath(username), defaultProfile(meta.name));
     const token = createSession(username);
     send(res, 200, {
       ok: true,
       token,
       username,
       name: meta.name || username,
-      profile,
+      profile: null,
     });
     return;
   }
@@ -274,6 +370,7 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/logout" && req.method === "POST") {
     const sess = sessionUser(req);
     if (sess) {
+      leavePresence(sess.username, sess.token);
       const sessions = loadSessions();
       delete sessions[sess.token];
       saveSessions(sessions);
@@ -289,27 +386,16 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const meta = readJson(metaPath(sess.username), null);
-    const profile = readJson(profilePath(sess.username), defaultProfile(sess.username));
     send(res, 200, {
       username: sess.username,
       name: (meta && meta.name) || sess.username,
-      profile,
+      profile: null,
     });
     return;
   }
 
-  if (pathname === "/api/profile" && req.method === "GET") {
-    const sess = sessionUser(req);
-    if (!sess) {
-      send(res, 401, { error: "Not logged in." });
-      return;
-    }
-    const profile = readJson(profilePath(sess.username), defaultProfile(sess.username));
-    send(res, 200, { profile });
-    return;
-  }
-
-  if (pathname === "/api/profile" && req.method === "PUT") {
+  // Live peer sync — RAM only, never written to disk
+  if (pathname === "/api/presence" && req.method === "POST") {
     const sess = sessionUser(req);
     if (!sess) {
       send(res, 401, { error: "Not logged in." });
@@ -317,23 +403,44 @@ async function handleApi(req, res, pathname) {
     }
     const body = await readBody(req);
     if (!body.profile || typeof body.profile !== "object") {
-      send(res, 400, { error: "Missing profile." });
+      send(res, 400, { error: "Missing local profile." });
       return;
     }
-    // Keep the client's updatedAt so local-vs-server compare stays honest
-    const profile = { ...body.profile };
-    delete profile.password;
-    delete profile.passwordHash;
-    profile.onboarded = true;
-    if (!profile.updatedAt) profile.updatedAt = new Date().toISOString();
-    writeJson(profilePath(sess.username), profile);
-    // keep display name in meta in sync
-    const meta = readJson(metaPath(sess.username), null);
-    if (meta && profile.name) {
-      meta.name = profile.name;
-      writeJson(metaPath(sess.username), meta);
+    const result = announcePresence(sess.username, sess.token, body.profile);
+    send(res, 200, {
+      ok: true,
+      peers: result.peers,
+      youAreWinner: result.youAreWinner,
+      winner: result.winner,
+      winnerScore: result.winnerScore,
+      storesLearningData: false,
+    });
+    return;
+  }
+
+  if (pathname === "/api/presence" && req.method === "GET") {
+    const sess = sessionUser(req);
+    if (!sess) {
+      send(res, 401, { error: "Not logged in." });
+      return;
     }
-    send(res, 200, { ok: true, profile });
+    pruneRoom(sess.username);
+    const winner = pickWinner(sess.username);
+    const room = liveRooms.get(sess.username);
+    send(res, 200, {
+      peers: room ? room.size : 0,
+      winner: winner ? winner.profile : null,
+      storesLearningData: false,
+    });
+    return;
+  }
+
+  // Old mailbox endpoints — disabled (no disk learning data)
+  if (pathname === "/api/profile") {
+    send(res, 410, {
+      error: "Server does not store learning data. Use live peer sync (/api/presence).",
+      storesLearningData: false,
+    });
     return;
   }
 
@@ -374,8 +481,13 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Drop stale peers periodically so RAM never keeps offline data
+setInterval(() => {
+  for (const username of [...liveRooms.keys()]) pruneRoom(username);
+}, 15000);
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n  kritX running → http://localhost:${PORT}`);
-  console.log(`  On your LAN  → http://<this-pc-ip>:${PORT}`);
-  console.log(`  Users & data → ${USERS_DIR}\n`);
+  console.log(`  Learning data → NEVER saved on server (live peer sync only)`);
+  console.log(`  Auth only    → ${USERS_DIR}\n`);
 });
